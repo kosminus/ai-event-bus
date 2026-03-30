@@ -104,6 +104,8 @@ class EventBus:
             memory_scope=event_create.memory_scope,
             source=event_create.source,
             producer_id=producer_id,
+            expires_at=event_create.expires_at,
+            max_retries=event_create.max_retries,
         )
 
         # Dedupe check
@@ -189,14 +191,21 @@ class EventBus:
         except Exception as e:
             logger.error("Routing error for event %s: %s", event.id, e)
 
-    async def _emit_system_event(self, topic: str, payload: dict) -> None:
+    async def update_event_status(self, event_id: str, status: EventStatus) -> None:
+        """Update event status and broadcast the change via WebSocket."""
+        await self.event_repo.update_status(event_id, status)
+        await self.ws_hub.broadcast(
+            f"events:*", "event.status",
+            {"id": event_id, "status": status.value},
+        )
+
+    async def _emit_system_event(self, topic: str, payload: dict) -> Event:
         """Emit a system event (for dead letter, chain limit, etc.)."""
-        system_event = EventCreate(topic=topic, payload=payload, priority="high")
         # Avoid infinite recursion — system events don't get routed
         event = Event(
-            topic=system_event.topic,
-            payload=system_event.payload,
-            priority=system_event.priority,
+            topic=topic,
+            payload=payload,
+            priority="high",
             source="system",
         )
         await self.event_repo.create(event)
@@ -204,6 +213,7 @@ class EventBus:
             f"events:{topic}", "event.new",
             event.model_dump(mode="json"),
         )
+        return event
 
     async def publish_system_event(self, topic: str, payload: dict) -> Event:
         """Public method to emit system events."""

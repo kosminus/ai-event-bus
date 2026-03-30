@@ -98,7 +98,7 @@ class LLMAgentConsumer(BaseConsumer):
         self._wake_event.set()
 
     async def _run_loop(self) -> None:
-        """Main worker loop — wait for work, claim, process."""
+        """Main worker loop — wait for work, claim, spawn concurrent tasks."""
         while self._running:
             try:
                 # Wait for notification
@@ -108,20 +108,30 @@ class LLMAgentConsumer(BaseConsumer):
                 if not self._running:
                     break
 
-                # Process all available assignments
+                # Claim and spawn tasks up to max_concurrent
                 while self._running:
+                    # Acquire semaphore before claiming to respect concurrency limit
+                    await self._semaphore.acquire()
                     assignment = await self.assignment_repo.claim_next(self.agent.id)
                     if not assignment:
+                        self._semaphore.release()
                         break  # No more work, go back to waiting
 
-                    async with self._semaphore:
-                        await self._process_assignment(assignment)
+                    # Spawn concurrent task — semaphore released when done
+                    asyncio.create_task(self._process_with_semaphore(assignment))
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Agent %s loop error: %s", self.agent.id, e)
                 await asyncio.sleep(1)  # Brief pause before retrying
+
+    async def _process_with_semaphore(self, assignment) -> None:
+        """Process assignment and release semaphore when done."""
+        try:
+            await self._process_assignment(assignment)
+        finally:
+            self._semaphore.release()
 
     async def _process_assignment(self, assignment) -> None:
         """Process a single assignment: context → Ollama → parse → actions."""
@@ -131,10 +141,10 @@ class LLMAgentConsumer(BaseConsumer):
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.failed, "Event not found")
             return
 
-        # Update statuses
+        # Update statuses (use bus for event status to trigger WebSocket broadcast)
         await self.assignment_repo.update_status(assignment.id, AssignmentStatus.running)
         await self.agent_repo.update_status(self.agent.id, AgentStatus.processing.value)
-        await self.event_repo.update_status(event.id, EventStatus.processing)
+        await self.bus.update_event_status(event.id, EventStatus.processing)
 
         # Broadcast status change
         await self.ws_hub.broadcast(
@@ -221,7 +231,7 @@ class LLMAgentConsumer(BaseConsumer):
 
             # 9. Mark complete
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.completed)
-            await self.event_repo.update_status(event.id, EventStatus.completed)
+            await self.bus.update_event_status(event.id, EventStatus.completed)
 
             # Broadcast completion
             await self.ws_hub.broadcast(
@@ -247,7 +257,7 @@ class LLMAgentConsumer(BaseConsumer):
             await self.assignment_repo.update_status(
                 assignment.id, AssignmentStatus.failed, str(e)
             )
-            await self.event_repo.update_status(event.id, EventStatus.failed)
+            await self.bus.update_event_status(event.id, EventStatus.failed)
 
             await self.bus._emit_system_event("system.agent_failure", {
                 "agent_id": self.agent.id,

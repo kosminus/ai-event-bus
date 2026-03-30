@@ -54,8 +54,13 @@ class AssignmentManager:
         self.agent_repo = agent_repo
         self.assignment_repo = assignment_repo
         self.rule_repo = rule_repo
+        self._bus = None  # Set via set_bus() to avoid circular dep
         # Callback to notify agents that new work is available
         self._notify_agent: dict[str, callable] = {}
+
+    def set_bus(self, bus) -> None:
+        """Set bus reference for system events and status broadcasts."""
+        self._bus = bus
 
     def register_agent_notifier(self, agent_id: str, notifier: callable) -> None:
         """Register a callback to wake an agent when assignments arrive."""
@@ -104,9 +109,17 @@ class AssignmentManager:
             ))
 
         if not matches:
-            # No routing rules matched — send to system.unmatched
+            # No routing rules matched — emit to system.unmatched
             logger.info("No routing match for event %s (topic=%s)", event.id, event.topic)
-            await self.event_repo.update_status(event.id, EventStatus.routed)
+            if self._bus:
+                await self._bus.update_event_status(event.id, EventStatus.routed)
+                await self._bus._emit_system_event("system.unmatched", {
+                    "event_id": event.id,
+                    "topic": event.topic,
+                    "semantic_type": event.semantic_type,
+                })
+            else:
+                await self.event_repo.update_status(event.id, EventStatus.routed)
             return []
 
         # Create assignments and notify agents
@@ -134,7 +147,10 @@ class AssignmentManager:
                 except Exception as e:
                     logger.error("Failed to notify agent %s: %s", match.agent_id, e)
 
-        await self.event_repo.update_status(event.id, EventStatus.assigned)
+        if self._bus:
+            await self._bus.update_event_status(event.id, EventStatus.assigned)
+        else:
+            await self.event_repo.update_status(event.id, EventStatus.assigned)
         return matches
 
     def _rule_matches(self, rule, event: Event) -> bool:

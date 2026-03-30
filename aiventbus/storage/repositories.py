@@ -46,8 +46,8 @@ class EventRepository:
         await self.db.conn.execute(
             """INSERT INTO events (id, timestamp, topic, payload, priority, semantic_type,
                dedupe_key, dedupe_count, parent_event, output_topic, context_refs,
-               memory_scope, source, status, producer_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               memory_scope, source, status, producer_id, expires_at, max_retries, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event.id, event.timestamp.isoformat(), event.topic,
                 json.dumps(event.payload), event.priority.value,
@@ -55,6 +55,8 @@ class EventRepository:
                 event.parent_event, event.output_topic,
                 json.dumps(event.context_refs), event.memory_scope,
                 event.source, event.status.value, event.producer_id,
+                event.expires_at.isoformat() if event.expires_at else None,
+                event.max_retries,
                 event.created_at.isoformat(),
             ),
         )
@@ -211,6 +213,8 @@ class EventRepository:
             source=row["source"],
             status=row["status"],
             producer_id=row["producer_id"],
+            expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+            max_retries=row["max_retries"] or 0,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -419,21 +423,37 @@ class AssignmentRepository:
         return assignment
 
     async def claim_next(self, agent_id: str) -> EventAssignment | None:
-        """Atomically claim the next pending assignment for an agent."""
+        """Atomically claim the next pending assignment for an agent.
+
+        Uses UPDATE ... WHERE status = 'pending' RETURNING to prevent double-claims.
+        Falls back to UPDATE-then-SELECT if RETURNING is not supported.
+        """
+        now = _now_iso()
+        # Atomic: UPDATE with status predicate — only succeeds if still pending
+        cursor = await self.db.conn.execute(
+            """UPDATE event_assignments
+               SET status = 'claimed', started_at = ?
+               WHERE id = (
+                   SELECT id FROM event_assignments
+                   WHERE agent_id = ? AND status = 'pending'
+                   ORDER BY created_at ASC LIMIT 1
+               ) AND status = 'pending'""",
+            (now, agent_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+        await self.db.conn.commit()
+
+        # Fetch the claimed row
         cursor = await self.db.conn.execute(
             """SELECT * FROM event_assignments
-               WHERE agent_id = ? AND status = 'pending'
+               WHERE agent_id = ? AND status = 'claimed' AND started_at = ?
                ORDER BY created_at ASC LIMIT 1""",
-            (agent_id,),
+            (agent_id, now),
         )
         row = await cursor.fetchone()
         if not row:
             return None
-        await self.db.conn.execute(
-            "UPDATE event_assignments SET status = 'claimed', started_at = ? WHERE id = ?",
-            (_now_iso(), row["id"]),
-        )
-        await self.db.conn.commit()
         return self._row_to_assignment(row)
 
     async def update_status(self, assignment_id: str, status: AssignmentStatus, error_message: str | None = None) -> None:

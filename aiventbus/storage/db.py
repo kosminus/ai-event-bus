@@ -27,8 +27,11 @@ CREATE TABLE IF NOT EXISTS events (
     source TEXT,
     status TEXT DEFAULT 'received',
     producer_id TEXT,
+    expires_at TEXT,
+    max_retries INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_events_expires_at ON events(expires_at);
 CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic);
 CREATE INDEX IF NOT EXISTS idx_events_semantic_type ON events(semantic_type);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);

@@ -18,6 +18,7 @@ from aiventbus.config import AppConfig, load_config
 from aiventbus.consumers.llm_agent import LLMAgentConsumer
 from aiventbus.core.assignments import AssignmentManager
 from aiventbus.core.bus import EventBus, WebSocketHub
+from aiventbus.core.lifecycle import LifecycleManager
 from aiventbus.storage.db import Database
 from aiventbus.storage.repositories import (
     AgentRepository,
@@ -120,12 +121,13 @@ _db: Database | None = None
 _bus: EventBus | None = None
 _ollama: OllamaClient | None = None
 _agent_manager: AgentManager | None = None
+_lifecycle: LifecycleManager | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic."""
-    global _config, _db, _bus, _ollama, _agent_manager
+    global _config, _db, _bus, _ollama, _agent_manager, _lifecycle
 
     # Load config
     _config = load_config()
@@ -170,8 +172,13 @@ async def lifespan(app: FastAPI):
         _config, event_repo, agent_repo, assignment_repo, rule_repo
     )
 
-    # Wire the router into the bus
+    # Wire the router into the bus and give assignment manager a bus reference
+    assignment_manager.set_bus(_bus)
     _bus.set_router(assignment_manager.route_event)
+
+    # Initialize lifecycle manager (expiry + retry)
+    _lifecycle = LifecycleManager(_db)
+    await _lifecycle.start()
 
     # Initialize agent manager
     _agent_manager = AgentManager(
@@ -212,6 +219,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await _lifecycle.stop()
     await _agent_manager.stop_all()
     await _ollama.close()
     await _db.close()

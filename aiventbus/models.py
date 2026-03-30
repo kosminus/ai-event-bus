@@ -86,6 +86,8 @@ class EventCreate(BaseModel):
     context_refs: list[str] = Field(default_factory=list)
     memory_scope: str | None = None
     source: str | None = None
+    expires_at: datetime | None = None
+    max_retries: int = 0
 
 
 class Event(BaseModel):
@@ -107,6 +109,8 @@ class Event(BaseModel):
     # Lifecycle
     status: EventStatus = EventStatus.received
     producer_id: str | None = None
+    expires_at: datetime | None = None
+    max_retries: int = 0
     created_at: datetime = Field(default_factory=_now)
 
 
