@@ -1,0 +1,268 @@
+"""Pydantic models for the AI Event Bus — tiered event schema."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+
+def _evt_id() -> str:
+    return f"evt_{uuid4().hex[:12]}"
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# --- Enums ---
+
+class Priority(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    critical = "critical"
+
+
+class EventStatus(str, Enum):
+    received = "received"
+    deduped = "deduped"
+    routed = "routed"
+    assigned = "assigned"
+    processing = "processing"
+    completed = "completed"
+    expired = "expired"
+    failed = "failed"
+    compressed = "compressed"
+
+
+class AssignmentStatus(str, Enum):
+    pending = "pending"
+    claimed = "claimed"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    retry_wait = "retry_wait"
+
+
+class AgentStatus(str, Enum):
+    idle = "idle"
+    processing = "processing"
+    error = "error"
+    disabled = "disabled"
+
+
+class ProducerType(str, Enum):
+    manual = "manual"
+    cron = "cron"
+    file_watcher = "file_watcher"
+    log_tail = "log_tail"
+    webhook = "webhook"
+    fixture = "fixture"
+    replay = "replay"
+
+
+class ProducerStatus(str, Enum):
+    running = "running"
+    stopped = "stopped"
+    error = "error"
+
+
+# --- Event Models (tiered schema) ---
+
+class EventCreate(BaseModel):
+    """Input model for creating an event. Only topic + payload required."""
+    topic: str
+    payload: dict[str, Any]
+    # First-class optional
+    priority: Priority = Priority.medium
+    semantic_type: str | None = None
+    dedupe_key: str | None = None
+    parent_event: str | None = None
+    output_topic: str | None = None
+    context_refs: list[str] = Field(default_factory=list)
+    memory_scope: str | None = None
+    source: str | None = None
+
+
+class Event(BaseModel):
+    """Full event as stored and transmitted."""
+    id: str = Field(default_factory=_evt_id)
+    timestamp: datetime = Field(default_factory=_now)
+    topic: str
+    payload: dict[str, Any]
+    # First-class optional
+    priority: Priority = Priority.medium
+    semantic_type: str | None = None
+    dedupe_key: str | None = None
+    dedupe_count: int = 1
+    parent_event: str | None = None
+    output_topic: str | None = None
+    context_refs: list[str] = Field(default_factory=list)
+    memory_scope: str | None = None
+    source: str | None = None
+    # Lifecycle
+    status: EventStatus = EventStatus.received
+    producer_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+# --- Agent Models ---
+
+class AgentCreate(BaseModel):
+    """Input model for creating an agent."""
+    name: str
+    model: str
+    system_prompt: str = "You are a helpful AI agent processing events from an event bus."
+    description: str | None = None
+    fallback_model: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    max_concurrent: int = 1
+    queue_size: int = 50
+    memory_scope: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class Agent(BaseModel):
+    """Full agent as stored."""
+    id: str
+    name: str
+    model: str
+    system_prompt: str = "You are a helpful AI agent processing events from an event bus."
+    description: str | None = None
+    fallback_model: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    max_concurrent: int = 1
+    queue_size: int = 50
+    memory_scope: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    status: AgentStatus = AgentStatus.idle
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+# --- Producer Models ---
+
+class ProducerCreate(BaseModel):
+    """Input model for creating a producer."""
+    name: str
+    type: ProducerType
+    config: dict[str, Any] = Field(default_factory=dict)
+    default_topic: str | None = None
+    default_semantic_type: str | None = None
+    default_priority: Priority = Priority.medium
+
+
+class Producer(BaseModel):
+    """Full producer as stored."""
+    id: str
+    name: str
+    type: ProducerType
+    config: dict[str, Any] = Field(default_factory=dict)
+    default_topic: str | None = None
+    default_semantic_type: str | None = None
+    default_priority: Priority = Priority.medium
+    status: ProducerStatus = ProducerStatus.stopped
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+# --- Routing Rule Models ---
+
+class RoutingRuleCreate(BaseModel):
+    """Input model for creating a routing rule."""
+    name: str
+    topic_pattern: str | None = None
+    semantic_type_pattern: str | None = None
+    min_priority: Priority | None = None
+    required_capabilities: list[str] = Field(default_factory=list)
+    consumer_id: str
+    model_override: str | None = None
+    token_budget_override: int | None = None
+    priority_order: int = 100
+    enabled: bool = True
+
+
+class RoutingRule(BaseModel):
+    """Full routing rule as stored."""
+    id: str
+    name: str
+    topic_pattern: str | None = None
+    semantic_type_pattern: str | None = None
+    min_priority: Priority | None = None
+    required_capabilities: list[str] = Field(default_factory=list)
+    consumer_id: str
+    model_override: str | None = None
+    token_budget_override: int | None = None
+    priority_order: int = 100
+    enabled: bool = True
+    created_at: datetime = Field(default_factory=_now)
+
+
+# --- Assignment Models ---
+
+class EventAssignment(BaseModel):
+    """Tracks which agent is handling which event."""
+    id: str
+    event_id: str
+    agent_id: str
+    status: AssignmentStatus = AssignmentStatus.pending
+    retry_count: int = 0
+    model_used: str | None = None
+    token_budget: int | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+# --- Agent Response Models ---
+
+class AgentResponseOutput(BaseModel):
+    """Structured output from an LLM agent."""
+    type: str  # analysis | action | escalate
+    summary: str
+    confidence: float | None = None
+    proposed_actions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentResponse(BaseModel):
+    """Stored agent response."""
+    id: str
+    assignment_id: str
+    agent_id: str
+    event_id: str
+    response_text: str
+    parsed_output: AgentResponseOutput | None = None
+    output_event_id: str | None = None
+    model_used: str | None = None
+    tokens_used: int | None = None
+    duration_ms: int | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+# --- Memory Models ---
+
+class MemoryEntry(BaseModel):
+    """A single memory entry for an agent."""
+    id: int | None = None
+    agent_id: str
+    memory_scope: str
+    role: str  # system | user | assistant
+    content: str
+    event_id: str | None = None
+    token_count: int | None = None
+    created_at: datetime = Field(default_factory=_now)
+
+
+class PinnedFact(BaseModel):
+    """A persistent fact for an agent."""
+    id: int | None = None
+    agent_id: str
+    memory_scope: str
+    content: str
+    created_at: datetime = Field(default_factory=_now)

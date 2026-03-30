@@ -1,0 +1,22 @@
+[project]
+name = "aiventbus"
+version = "0.1.0"
+description = "A local-first intelligence bus — event-driven runtime for orchestrating LLM agents via Ollama"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "aiosqlite>=0.20.0",
+    "httpx>=0.28.0",
+    "apscheduler>=3.10.0",
+    "watchfiles>=1.0.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+aiventbus = "aiventbus.main:cli"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

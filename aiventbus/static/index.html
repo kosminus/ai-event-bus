@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Event Bus</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <h1>AI Event Bus</h1>
+            <div class="header-right">
+                <span id="ws-status" class="status-dot" title="Connecting..."></span>
+                <span style="color:var(--text-muted);font-size:11px">v0.1.0</span>
+            </div>
+        </header>
+
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="sidebar-section">
+                <h3>Navigation</h3>
+                <div class="nav-item active" data-view="dashboard" onclick="navigate('dashboard')">
+                    <span>Dashboard</span>
+                </div>
+                <div class="nav-item" data-view="events" onclick="navigate('events')">
+                    <span>Events</span>
+                    <span class="count" id="event-count">0</span>
+                </div>
+                <div class="nav-item" data-view="agents" onclick="navigate('agents')">
+                    <span>Agents</span>
+                    <span class="count" id="agent-count">0</span>
+                </div>
+                <div class="nav-item" data-view="config" onclick="navigate('config')">
+                    <span>Config</span>
+                </div>
+            </div>
+            <div class="sidebar-section">
+                <h3>Topics</h3>
+                <div id="topic-list"></div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main" id="main-content">
+            <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)">
+                Loading...
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal overlay -->
+    <div class="modal-overlay" id="modal-overlay"></div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/app.js"></script>
+    <script>
+        // Update sidebar counts reactively
+        const origRender = render;
+        window._origRender = render;
+        render = function() {
+            origRender();
+            const ec = document.getElementById('event-count');
+            const ac = document.getElementById('agent-count');
+            if (ec) ec.textContent = state.events.length;
+            if (ac) ac.textContent = state.agents.length;
+        };
+    </script>
+</body>
+</html>
