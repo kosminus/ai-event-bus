@@ -1,11 +1,20 @@
 # AI Event Bus
 
-A local-first AI control plane — an event-driven runtime for orchestrating multiple LLM agents via [Ollama](https://ollama.com). Think "Kafka meets AI agent framework" but running entirely on your machine.
+A local-first AI control plane for **Linux** — an event-driven runtime that sits between your operating system and LLM agents via [Ollama](https://ollama.com). It gives your machine ambient intelligence: agents that watch, decide, and act on your behalf.
+
+Built for **Ubuntu/Debian** and Linux desktops (GNOME, KDE). Deep OS integration via DBus, inotify, systemd, and desktop notifications. Runs entirely on your machine — no cloud, no API keys, no data leaves your box.
 
 ```
-producers → event bus → routing → context engine → LLM agents → policy engine → executor → OS
-     ↑                                                                                    │
-     └──────────────────────── chain reactions ────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│              USER (widget / CLI)             │
+├─────────────────────────────────────────────┤
+│           aiventbus control plane            │
+│  events → routing → context → agents → acts  │
+├─────────────────────────────────────────────┤
+│        Linux OS (DBus, systemd, fs)          │
+├─────────────────────────────────────────────┤
+│        Hardware (GPU, disk, network)          │
+└─────────────────────────────────────────────┘
 ```
 
 ## Why?
@@ -21,9 +30,20 @@ Existing AI agent frameworks (LangChain, CrewAI) are request/response. This is e
 - **Full traceability** — trace_id on every causal chain from trigger to action
 - **All local** — runs on your machine via Ollama, free and private
 
+## Platform support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **Ubuntu/Debian** | Full support | Primary target. DBus, inotify, notify-send, systemd |
+| **Arch/Fedora** | Should work | Same Linux APIs, untested |
+| **macOS** | Partial | Core bus + agents work. No DBus, limited producers. Planned for future |
+| **Windows** | Not supported | Different OS APIs entirely |
+
+**Hardware:** Works on any machine with Ollama. Benefits from a GPU (NVIDIA recommended) for faster inference. Tested on RTX 5090 + RTX 6000 Pro with 70B+ models.
+
 ## Quick start
 
-**Prerequisites:** Python 3.11+, [Ollama](https://ollama.com) running locally
+**Prerequisites:** Python 3.11+, Linux, [Ollama](https://ollama.com) running locally
 
 ```bash
 # Install
@@ -125,6 +145,21 @@ classifier:
   enabled: true
   model: "gemma3:latest"
 ```
+
+## Linux integration
+
+aiventbus hooks into the OS to observe and act:
+
+| Integration | How | What it does |
+|-------------|-----|-------------|
+| **Clipboard** | `wl-paste` / `xclip` | Monitors clipboard changes, agents can analyze copied text (stack traces, URLs, code) |
+| **File system** | `inotify` via watchfiles | Watches directories (Downloads, Documents), agents can triage/organize files |
+| **Desktop notifications** | DBus `org.freedesktop.Notifications` | Captures notifications from other apps, sends AI-generated notifications via `notify-send` |
+| **Session events** | DBus `org.freedesktop.login1` | Detects screen lock/unlock for context-aware behavior |
+| **Terminal** | Shell history monitoring | Watches bash/zsh history, agents can detect errors and suggest fixes |
+| **Shell commands** | `asyncio.subprocess` | Agents propose commands, policy engine gates them, executor runs approved ones |
+| **File operations** | Python pathlib | Agents can read/write/delete files (with policy confirmation) |
+| **App launching** | `xdg-open` | Agents can open URLs and files in default applications |
 
 ## Event schema
 
