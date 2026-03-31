@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Any, Callable, Coroutine
 
+from uuid import uuid4
+
 from aiventbus.config import AppConfig
 from aiventbus.models import Event, EventCreate, EventStatus
 from aiventbus.storage.repositories import (
@@ -91,6 +93,15 @@ class EventBus:
 
     async def publish(self, event_create: EventCreate, producer_id: str | None = None) -> Event:
         """Main entry point. Ingest → dedupe → persist → route → broadcast."""
+        # Resolve trace_id: inherit from parent, or use provided, or generate new
+        trace_id = event_create.trace_id
+        if not trace_id and event_create.parent_event:
+            parent = await self.event_repo.get(event_create.parent_event)
+            if parent and parent.trace_id:
+                trace_id = parent.trace_id
+        if not trace_id:
+            trace_id = f"tr_{uuid4().hex[:12]}"
+
         # Build full event
         event = Event(
             topic=event_create.topic,
@@ -103,6 +114,7 @@ class EventBus:
             context_refs=event_create.context_refs,
             memory_scope=event_create.memory_scope,
             source=event_create.source,
+            trace_id=trace_id,
             producer_id=producer_id,
             expires_at=event_create.expires_at,
             max_retries=event_create.max_retries,

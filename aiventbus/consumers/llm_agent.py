@@ -21,7 +21,10 @@ from aiventbus.ai.ollama_client import OllamaClient
 from aiventbus.ai.output_parser import OutputParser
 from aiventbus.consumers.base import BaseConsumer
 from aiventbus.core.bus import EventBus, WebSocketHub
+from aiventbus.core.executor import Executor
+from aiventbus.core.policy import PolicyEngine
 from aiventbus.models import (
+    ActionStatus,
     Agent,
     AgentResponse,
     AgentStatus,
@@ -29,12 +32,15 @@ from aiventbus.models import (
     EventCreate,
     EventStatus,
     MemoryEntry,
+    PendingAction,
+    TrustMode,
 )
 from aiventbus.storage.repositories import (
     AgentRepository,
     AssignmentRepository,
     EventRepository,
     MemoryRepository,
+    PendingActionRepository,
     ResponseRepository,
 )
 
@@ -57,6 +63,9 @@ class LLMAgentConsumer(BaseConsumer):
         memory_repo: MemoryRepository,
         response_repo: ResponseRepository,
         ws_hub: WebSocketHub,
+        policy_engine: PolicyEngine | None = None,
+        executor: Executor | None = None,
+        action_repo: PendingActionRepository | None = None,
     ):
         self.agent = agent
         self.bus = bus
@@ -69,6 +78,9 @@ class LLMAgentConsumer(BaseConsumer):
         self.memory_repo = memory_repo
         self.response_repo = response_repo
         self.ws_hub = ws_hub
+        self.policy_engine = policy_engine
+        self.executor = executor
+        self.action_repo = action_repo
 
         self._task: asyncio.Task | None = None
         self._wake_event = asyncio.Event()
@@ -112,7 +124,13 @@ class LLMAgentConsumer(BaseConsumer):
                 while self._running:
                     # Acquire semaphore before claiming to respect concurrency limit
                     await self._semaphore.acquire()
-                    assignment = await self.assignment_repo.claim_next(self.agent.id)
+
+                    # If this is the last slot, reserve it for interactive work
+                    if self.agent.max_concurrent > 1 and self._semaphore._value == 0:
+                        assignment = await self.assignment_repo.claim_next(self.agent.id, lane_filter="interactive")
+                    else:
+                        assignment = await self.assignment_repo.claim_next(self.agent.id)
+
                     if not assignment:
                         self._semaphore.release()
                         break  # No more work, go back to waiting
@@ -283,9 +301,10 @@ class LLMAgentConsumer(BaseConsumer):
         return self.agent.model
 
     async def _execute_action(self, action: dict, source_event, response) -> None:
-        """Execute a proposed action from the agent's structured output."""
+        """Execute a proposed action through the policy engine and executor."""
         action_type = action.get("action_type")
 
+        # Handle built-in bus actions directly (always auto-trusted)
         if action_type == "emit_event":
             topic = action.get("topic") or source_event.output_topic
             if not topic:
@@ -302,15 +321,66 @@ class LLMAgentConsumer(BaseConsumer):
                 ),
             )
             logger.info("Chain reaction: agent %s emitted event on %s", self.agent.id, topic)
+            return
 
-        elif action_type == "log":
+        if action_type == "log":
             message = action.get("message", "")
             logger.info("Agent %s log: %s", self.agent.id, message)
+            return
 
-        elif action_type == "alert":
+        if action_type == "alert":
             message = action.get("message", "")
             logger.warning("Agent %s ALERT: %s", self.agent.id, message)
             await self.ws_hub.broadcast(
                 "system", "system.alert",
                 {"agent_id": self.agent.id, "message": message},
             )
+            return
+
+        # All other actions go through policy engine → executor
+        if not self.policy_engine or not self.executor:
+            logger.warning("Agent %s proposed %s but policy/executor not configured", self.agent.id, action_type)
+            return
+
+        decision = self.policy_engine.evaluate(action_type, action)
+
+        if decision.trust_mode == TrustMode.deny:
+            logger.warning(
+                "DENIED action %s from agent %s: %s",
+                action_type, self.agent.id, decision.reason,
+            )
+            await self.bus._emit_system_event("system.action_denied", {
+                "agent_id": self.agent.id,
+                "event_id": source_event.id,
+                "action_type": action_type,
+                "reason": decision.reason,
+            })
+            return
+
+        if decision.trust_mode == TrustMode.auto:
+            result = await self.executor.execute(action_type, action)
+            logger.info("Auto-executed %s for agent %s: %s", action_type, self.agent.id, result)
+            return
+
+        # TrustMode.confirm — queue for user approval
+        if self.action_repo:
+            pending = PendingAction(
+                assignment_id=response.assignment_id if hasattr(response, "assignment_id") else "",
+                agent_id=self.agent.id,
+                event_id=source_event.id,
+                action_type=action_type,
+                action_data=action,
+                trust_mode=TrustMode.confirm,
+                status=ActionStatus.waiting_confirmation,
+                policy_reason=decision.reason,
+            )
+            await self.action_repo.create(pending)
+            logger.info("Action %s from agent %s queued for confirmation: %s", action_type, self.agent.id, pending.id)
+            await self.ws_hub.broadcast("system", "action.pending", {
+                "action_id": pending.id,
+                "agent_id": self.agent.id,
+                "action_type": action_type,
+                "action_data": action,
+            })
+        else:
+            logger.warning("Agent %s proposed %s requiring confirmation but no action_repo configured", self.agent.id, action_type)

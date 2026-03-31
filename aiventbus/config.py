@@ -42,12 +42,48 @@ class LoggingConfig:
 
 
 @dataclass
+class ProducersConfig:
+    clipboard_enabled: bool = True
+    clipboard_poll_interval_ms: int = 500
+    clipboard_min_length: int = 10
+    file_watcher_enabled: bool = False
+    file_watcher_paths: list = field(default_factory=lambda: ["~/Downloads", "~/Documents"])
+    dbus_enabled: bool = False
+    terminal_monitor_enabled: bool = False
+    terminal_history_path: str | None = None
+
+
+@dataclass
+class PolicyConfig:
+    trust_overrides: dict = field(default_factory=dict)
+    shell_timeout_seconds: int = 30
+
+
+@dataclass
+class ClassifierConfig:
+    enabled: bool = False
+    model: str = "gemma3:latest"
+    timeout_seconds: int = 10
+
+
+@dataclass
+class LaneConfig:
+    interactive_prefixes: list = field(default_factory=lambda: ["user."])
+    critical_prefixes: list = field(default_factory=lambda: ["security.", "system.failure"])
+    reserve_interactive_slot: bool = True
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     bus: BusConfig = field(default_factory=BusConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    producers: ProducersConfig = field(default_factory=ProducersConfig)
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
+    lanes: LaneConfig = field(default_factory=LaneConfig)
+    classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
 
 
 def _merge_dict(base: dict, override: dict) -> dict:
@@ -82,4 +118,8 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         database=DatabaseConfig(**raw.get("database", {})),
         bus=BusConfig(**raw.get("bus", {})),
         logging=LoggingConfig(**raw.get("logging", {})),
+        producers=ProducersConfig(**raw.get("producers", {})),
+        policy=PolicyConfig(**raw.get("policy", {})),
+        lanes=LaneConfig(**raw.get("lanes", {})),
+        classifier=ClassifierConfig(**raw.get("classifier", {})),
     )

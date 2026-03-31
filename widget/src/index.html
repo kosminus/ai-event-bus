@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>aiventbus</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Chat bar -->
+    <div id="chat-bar">
+        <input type="text" id="chat-input" placeholder="Ask anything..." autocomplete="off">
+        <span class="chat-hint">Ctrl+Space</span>
+    </div>
+
+    <!-- Chat response -->
+    <div id="chat-response" class="hidden">
+        <div id="chat-response-text"></div>
+        <button id="chat-close" onclick="closeChat()">&times;</button>
+    </div>
+
+    <!-- Tabs -->
+    <div id="tab-bar">
+        <button class="tab active" data-tab="all" onclick="switchTab('all')">All</button>
+        <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
+        <button class="tab" data-tab="security" onclick="switchTab('security')">Security</button>
+        <button class="tab" data-tab="approvals" onclick="switchTab('approvals')">
+            Approvals <span id="approvals-badge" class="badge hidden">0</span>
+        </button>
+    </div>
+
+    <!-- Event feed -->
+    <div id="feed"></div>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+        <span id="connection-status">
+            <span id="status-dot" class="dot disconnected"></span>
+            <span id="status-text">connecting...</span>
+        </span>
+        <a href="#" id="open-dashboard" onclick="openDashboard()">Open Dashboard</a>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

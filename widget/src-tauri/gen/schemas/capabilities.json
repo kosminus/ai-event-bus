@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for aiventbus widget","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open","notification:default","notification:allow-notify","notification:allow-is-permission-granted","notification:allow-request-permission","global-shortcut:allow-register","global-shortcut:allow-unregister"]}}

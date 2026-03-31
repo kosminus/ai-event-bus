@@ -10,13 +10,16 @@ import logging
 from fnmatch import fnmatch
 
 from aiventbus.config import AppConfig
-from aiventbus.models import Event, EventStatus, Priority
+from aiventbus.models import Event, EventStatus, Lane, Priority
 from aiventbus.storage.repositories import (
     AgentRepository,
     AssignmentRepository,
     EventRepository,
     RoutingRuleRepository,
 )
+
+# Lazy import to avoid circular deps
+_classifier = None
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +58,17 @@ class AssignmentManager:
         self.assignment_repo = assignment_repo
         self.rule_repo = rule_repo
         self._bus = None  # Set via set_bus() to avoid circular dep
+        self._classifier = None  # Set via set_classifier()
         # Callback to notify agents that new work is available
         self._notify_agent: dict[str, callable] = {}
 
     def set_bus(self, bus) -> None:
         """Set bus reference for system events and status broadcasts."""
         self._bus = bus
+
+    def set_classifier(self, classifier) -> None:
+        """Set the event classifier for fallback routing."""
+        self._classifier = classifier
 
     def register_agent_notifier(self, agent_id: str, notifier: callable) -> None:
         """Register a callback to wake an agent when assignments arrive."""
@@ -109,18 +117,28 @@ class AssignmentManager:
             ))
 
         if not matches:
-            # No routing rules matched — emit to system.unmatched
-            logger.info("No routing match for event %s (topic=%s)", event.id, event.topic)
-            if self._bus:
-                await self._bus.update_event_status(event.id, EventStatus.routed)
-                await self._bus._emit_system_event("system.unmatched", {
-                    "event_id": event.id,
-                    "topic": event.topic,
-                    "semantic_type": event.semantic_type,
-                })
-            else:
-                await self.event_repo.update_status(event.id, EventStatus.routed)
-            return []
+            # No static rules matched — try classifier fallback
+            if self._classifier:
+                classifier_matches = await self._classify_event(event, seen_agents)
+                if classifier_matches:
+                    matches = classifier_matches
+
+            if not matches:
+                # Still no match after classifier — emit to system.unmatched
+                logger.info("No routing match for event %s (topic=%s)", event.id, event.topic)
+                if self._bus:
+                    await self._bus.update_event_status(event.id, EventStatus.routed)
+                    await self._bus._emit_system_event("system.unmatched", {
+                        "event_id": event.id,
+                        "topic": event.topic,
+                        "semantic_type": event.semantic_type,
+                    })
+                else:
+                    await self.event_repo.update_status(event.id, EventStatus.routed)
+                return []
+
+        # Resolve priority lane for this event
+        lane = self._resolve_lane(event)
 
         # Create assignments and notify agents
         for match in matches:
@@ -133,6 +151,7 @@ class AssignmentManager:
                 agent_id=match.agent_id,
                 model_used=match.model_override,
                 token_budget=match.token_budget_override,
+                lane=lane,
             )
             logger.info(
                 "Created assignment %s: event %s -> agent %s",
@@ -176,3 +195,54 @@ class AssignmentManager:
             pass
 
         return True
+
+    def _resolve_lane(self, event: Event) -> Lane:
+        """Determine the priority lane for an event based on topic and priority."""
+        # Explicit critical priority always goes to critical lane
+        if event.priority == Priority.critical:
+            return Lane.critical
+
+        lanes_cfg = self.config.lanes
+        for prefix in lanes_cfg.interactive_prefixes:
+            if event.topic.startswith(prefix):
+                return Lane.interactive
+
+        for prefix in lanes_cfg.critical_prefixes:
+            if event.topic.startswith(prefix):
+                return Lane.critical
+
+        return Lane.ambient
+
+    async def _classify_event(self, event: Event, seen_agents: set[str]) -> list[RoutingMatch]:
+        """Use the LLM classifier to route an unmatched event."""
+        try:
+            agents = await self.agent_repo.list()
+            active_agents = [a for a in agents if a.status.value != "disabled"]
+            if not active_agents:
+                return []
+
+            result = await self._classifier.classify(event, active_agents)
+            logger.info(
+                "Classifier result for event %s: %s",
+                event.id, result,
+            )
+
+            if result.is_no_op:
+                logger.info("Classifier: no_op for event %s (%s)", event.id, result.reason)
+                return []
+
+            matches = []
+            for agent_id in result.route_to:
+                if agent_id in seen_agents:
+                    continue
+                if len(matches) >= self.config.bus.max_fan_out:
+                    break
+                matches.append(RoutingMatch(
+                    agent_id=agent_id,
+                    rule_id="classifier",
+                ))
+            return matches
+
+        except Exception as e:
+            logger.error("Classifier failed for event %s: %s", event.id, e)
+            return []

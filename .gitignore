@@ -31,5 +31,12 @@ config.yml
 .DS_Store
 Thumbs.db
 
+# Rust / Tauri
+widget/src-tauri/target/
+widget/src-tauri/Cargo.lock
+
+# Node (if ever used for widget)
+node_modules/
+
 # Claude
 .claude/

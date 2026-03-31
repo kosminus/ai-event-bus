@@ -71,6 +71,28 @@ class ProducerStatus(str, Enum):
     error = "error"
 
 
+class TrustMode(str, Enum):
+    auto = "auto"
+    confirm = "confirm"
+    deny = "deny"
+
+
+class ActionStatus(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    executing = "executing"
+    completed = "completed"
+    denied = "denied"
+    waiting_confirmation = "waiting_confirmation"
+    failed = "failed"
+
+
+class Lane(str, Enum):
+    interactive = "interactive"
+    critical = "critical"
+    ambient = "ambient"
+
+
 # --- Event Models (tiered schema) ---
 
 class EventCreate(BaseModel):
@@ -86,8 +108,13 @@ class EventCreate(BaseModel):
     context_refs: list[str] = Field(default_factory=list)
     memory_scope: str | None = None
     source: str | None = None
+    trace_id: str | None = None
     expires_at: datetime | None = None
     max_retries: int = 0
+
+
+def _trace_id() -> str:
+    return f"tr_{uuid4().hex[:12]}"
 
 
 class Event(BaseModel):
@@ -106,6 +133,7 @@ class Event(BaseModel):
     context_refs: list[str] = Field(default_factory=list)
     memory_scope: str | None = None
     source: str | None = None
+    trace_id: str | None = None
     # Lifecycle
     status: EventStatus = EventStatus.received
     producer_id: str | None = None
@@ -215,6 +243,7 @@ class EventAssignment(BaseModel):
     event_id: str
     agent_id: str
     status: AssignmentStatus = AssignmentStatus.pending
+    lane: Lane = Lane.ambient
     retry_count: int = 0
     model_used: str | None = None
     token_budget: int | None = None
@@ -270,3 +299,35 @@ class PinnedFact(BaseModel):
     memory_scope: str
     content: str
     created_at: datetime = Field(default_factory=_now)
+
+
+# --- Knowledge Models ---
+
+class KnowledgeEntry(BaseModel):
+    """A durable fact stored in the knowledge store."""
+    key: str
+    value: str
+    source: str | None = None
+    updated_at: datetime = Field(default_factory=_now)
+
+
+# --- Action Models ---
+
+def _action_id() -> str:
+    return f"act_{uuid4().hex[:10]}"
+
+
+class PendingAction(BaseModel):
+    """An action proposed by an agent, awaiting policy evaluation or user confirmation."""
+    id: str = Field(default_factory=_action_id)
+    assignment_id: str
+    agent_id: str
+    event_id: str
+    action_type: str
+    action_data: dict[str, Any] = Field(default_factory=dict)
+    trust_mode: TrustMode = TrustMode.confirm
+    status: ActionStatus = ActionStatus.pending
+    policy_reason: str | None = None
+    result: dict[str, Any] | None = None
+    created_at: datetime = Field(default_factory=_now)
+    resolved_at: datetime | None = None

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from aiventbus.models import (
+    ActionStatus,
     Agent,
     AgentCreate,
     AgentResponse,
@@ -16,12 +17,16 @@ from aiventbus.models import (
     EventCreate,
     EventStatus,
     AssignmentStatus,
+    KnowledgeEntry,
+    Lane,
     MemoryEntry,
+    PendingAction,
     PinnedFact,
     Producer,
     ProducerCreate,
     RoutingRule,
     RoutingRuleCreate,
+    TrustMode,
 )
 from aiventbus.storage.db import Database
 
@@ -46,15 +51,15 @@ class EventRepository:
         await self.db.conn.execute(
             """INSERT INTO events (id, timestamp, topic, payload, priority, semantic_type,
                dedupe_key, dedupe_count, parent_event, output_topic, context_refs,
-               memory_scope, source, status, producer_id, expires_at, max_retries, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               memory_scope, source, trace_id, status, producer_id, expires_at, max_retries, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event.id, event.timestamp.isoformat(), event.topic,
                 json.dumps(event.payload), event.priority.value,
                 event.semantic_type, event.dedupe_key, event.dedupe_count,
                 event.parent_event, event.output_topic,
                 json.dumps(event.context_refs), event.memory_scope,
-                event.source, event.status.value, event.producer_id,
+                event.source, event.trace_id, event.status.value, event.producer_id,
                 event.expires_at.isoformat() if event.expires_at else None,
                 event.max_retries,
                 event.created_at.isoformat(),
@@ -121,6 +126,15 @@ class EventRepository:
         )
         row = await cursor.fetchone()
         return self._row_to_event(row) if row else None
+
+    async def get_by_trace_id(self, trace_id: str) -> list[Event]:
+        """Get all events in a trace, ordered by timestamp."""
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM events WHERE trace_id = ? ORDER BY created_at ASC",
+            (trace_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_event(r) for r in rows]
 
     async def get_chain(self, event_id: str) -> list[Event]:
         """Get full chain: walk up to root, then get all descendants."""
@@ -211,6 +225,7 @@ class EventRepository:
             context_refs=json.loads(row["context_refs"] or "[]"),
             memory_scope=row["memory_scope"],
             source=row["source"],
+            trace_id=row["trace_id"] if "trace_id" in row.keys() else None,
             status=row["status"],
             producer_id=row["producer_id"],
             expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
@@ -401,44 +416,60 @@ class AssignmentRepository:
     def __init__(self, db: Database):
         self.db = db
 
-    async def create(self, event_id: str, agent_id: str, model_used: str | None = None, token_budget: int | None = None) -> EventAssignment:
+    async def create(self, event_id: str, agent_id: str, model_used: str | None = None, token_budget: int | None = None, lane: Lane = Lane.ambient) -> EventAssignment:
         assignment_id = f"assign_{uuid4().hex[:10]}"
         assignment = EventAssignment(
             id=assignment_id,
             event_id=event_id,
             agent_id=agent_id,
+            lane=lane,
             model_used=model_used,
             token_budget=token_budget,
         )
         await self.db.conn.execute(
-            """INSERT INTO event_assignments (id, event_id, agent_id, status,
+            """INSERT INTO event_assignments (id, event_id, agent_id, status, lane,
                retry_count, model_used, token_budget, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 assignment.id, assignment.event_id, assignment.agent_id,
-                assignment.status.value, 0, model_used, token_budget, _now_iso(),
+                assignment.status.value, lane.value, 0, model_used, token_budget, _now_iso(),
             ),
         )
         await self.db.conn.commit()
         return assignment
 
-    async def claim_next(self, agent_id: str) -> EventAssignment | None:
+    async def claim_next(self, agent_id: str, lane_filter: str | None = None) -> EventAssignment | None:
         """Atomically claim the next pending assignment for an agent.
 
-        Uses UPDATE ... WHERE status = 'pending' RETURNING to prevent double-claims.
-        Falls back to UPDATE-then-SELECT if RETURNING is not supported.
+        Assignments are ordered by priority lane (interactive > critical > ambient),
+        then by creation time within the same lane.
+
+        If lane_filter is set, only claim from that specific lane.
         """
         now = _now_iso()
-        # Atomic: UPDATE with status predicate — only succeeds if still pending
+        if lane_filter:
+            subquery = """SELECT id FROM event_assignments
+                          WHERE agent_id = ? AND status = 'pending' AND lane = ?
+                          ORDER BY created_at ASC LIMIT 1"""
+            subquery_params = (agent_id, lane_filter)
+        else:
+            subquery = """SELECT id FROM event_assignments
+                          WHERE agent_id = ? AND status = 'pending'
+                          ORDER BY
+                              CASE lane
+                                  WHEN 'interactive' THEN 0
+                                  WHEN 'critical' THEN 1
+                                  WHEN 'ambient' THEN 2
+                              END,
+                              created_at ASC
+                          LIMIT 1"""
+            subquery_params = (agent_id,)
+
         cursor = await self.db.conn.execute(
-            """UPDATE event_assignments
+            f"""UPDATE event_assignments
                SET status = 'claimed', started_at = ?
-               WHERE id = (
-                   SELECT id FROM event_assignments
-                   WHERE agent_id = ? AND status = 'pending'
-                   ORDER BY created_at ASC LIMIT 1
-               ) AND status = 'pending'""",
-            (now, agent_id),
+               WHERE id = ({subquery}) AND status = 'pending'""",
+            (now, *subquery_params),
         )
         if cursor.rowcount == 0:
             return None
@@ -498,6 +529,7 @@ class AssignmentRepository:
             event_id=row["event_id"],
             agent_id=row["agent_id"],
             status=row["status"],
+            lane=row["lane"] if row["lane"] else "ambient",
             retry_count=row["retry_count"],
             model_used=row["model_used"],
             token_budget=row["token_budget"],
@@ -568,6 +600,220 @@ class MemoryRepository:
             (agent_id, scope, content, _now_iso()),
         )
         await self.db.conn.commit()
+
+
+# --- Knowledge ---
+
+class KnowledgeRepository:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def get(self, key: str) -> KnowledgeEntry | None:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM knowledge WHERE key = ?", (key,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return KnowledgeEntry(
+            key=row["key"], value=row["value"], source=row["source"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    async def set(self, key: str, value: str, source: str | None = None) -> None:
+        await self.db.conn.execute(
+            """INSERT INTO knowledge (key, value, source, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source, updated_at = excluded.updated_at""",
+            (key, value, source, _now_iso()),
+        )
+        await self.db.conn.commit()
+
+    async def delete(self, key: str) -> bool:
+        cursor = await self.db.conn.execute(
+            "DELETE FROM knowledge WHERE key = ?", (key,)
+        )
+        await self.db.conn.commit()
+        return cursor.rowcount > 0
+
+    async def scan(self, prefix: str) -> list[KnowledgeEntry]:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM knowledge WHERE key LIKE ? ORDER BY key",
+            (prefix + "%",),
+        )
+        rows = await cursor.fetchall()
+        return [
+            KnowledgeEntry(
+                key=r["key"], value=r["value"], source=r["source"],
+                updated_at=datetime.fromisoformat(r["updated_at"]),
+            )
+            for r in rows
+        ]
+
+    async def list_all(self, limit: int = 100) -> list[KnowledgeEntry]:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM knowledge ORDER BY key LIMIT ?", (limit,)
+        )
+        rows = await cursor.fetchall()
+        return [
+            KnowledgeEntry(
+                key=r["key"], value=r["value"], source=r["source"],
+                updated_at=datetime.fromisoformat(r["updated_at"]),
+            )
+            for r in rows
+        ]
+
+
+# --- Producers ---
+
+class ProducerRepository:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def create(self, data: ProducerCreate) -> Producer:
+        producer_id = f"producer_{_slug(data.name)}"
+        now = _now_iso()
+        producer = Producer(
+            id=producer_id,
+            name=data.name,
+            type=data.type,
+            config=data.config,
+            default_topic=data.default_topic,
+            default_semantic_type=data.default_semantic_type,
+            default_priority=data.default_priority,
+        )
+        await self.db.conn.execute(
+            """INSERT INTO producers (id, name, type, config, default_topic,
+               default_semantic_type, default_priority, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                producer.id, producer.name, producer.type.value,
+                json.dumps(producer.config), producer.default_topic,
+                producer.default_semantic_type, producer.default_priority.value,
+                producer.status.value, now, now,
+            ),
+        )
+        await self.db.conn.commit()
+        return producer
+
+    async def get(self, producer_id: str) -> Producer | None:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM producers WHERE id = ?", (producer_id,)
+        )
+        row = await cursor.fetchone()
+        return self._row_to_producer(row) if row else None
+
+    async def list(self) -> list[Producer]:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM producers ORDER BY created_at"
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_producer(r) for r in rows]
+
+    async def update_status(self, producer_id: str, status: str, error_message: str | None = None) -> None:
+        await self.db.conn.execute(
+            "UPDATE producers SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
+            (status, error_message, _now_iso(), producer_id),
+        )
+        await self.db.conn.commit()
+
+    async def delete(self, producer_id: str) -> bool:
+        cursor = await self.db.conn.execute(
+            "DELETE FROM producers WHERE id = ?", (producer_id,)
+        )
+        await self.db.conn.commit()
+        return cursor.rowcount > 0
+
+    def _row_to_producer(self, row) -> Producer:
+        return Producer(
+            id=row["id"],
+            name=row["name"],
+            type=row["type"],
+            config=json.loads(row["config"] or "{}"),
+            default_topic=row["default_topic"],
+            default_semantic_type=row["default_semantic_type"],
+            default_priority=row["default_priority"] or "medium",
+            status=row["status"],
+            error_message=row["error_message"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+
+# --- Pending Actions ---
+
+class PendingActionRepository:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def create(self, action: PendingAction) -> PendingAction:
+        await self.db.conn.execute(
+            """INSERT INTO pending_actions (id, assignment_id, agent_id, event_id,
+               action_type, action_data, trust_mode, status, policy_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                action.id, action.assignment_id, action.agent_id, action.event_id,
+                action.action_type, json.dumps(action.action_data),
+                action.trust_mode.value, action.status.value,
+                action.policy_reason, _now_iso(),
+            ),
+        )
+        await self.db.conn.commit()
+        return action
+
+    async def get(self, action_id: str) -> PendingAction | None:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM pending_actions WHERE id = ?", (action_id,)
+        )
+        row = await cursor.fetchone()
+        return self._row_to_action(row) if row else None
+
+    async def list_pending(self, limit: int = 50) -> list[PendingAction]:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM pending_actions WHERE status = 'waiting_confirmation' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_action(r) for r in rows]
+
+    async def approve(self, action_id: str) -> PendingAction | None:
+        await self.db.conn.execute(
+            "UPDATE pending_actions SET status = 'approved', resolved_at = ? WHERE id = ? AND status = 'waiting_confirmation'",
+            (_now_iso(), action_id),
+        )
+        await self.db.conn.commit()
+        return await self.get(action_id)
+
+    async def deny(self, action_id: str, reason: str | None = None) -> PendingAction | None:
+        await self.db.conn.execute(
+            "UPDATE pending_actions SET status = 'denied', policy_reason = COALESCE(?, policy_reason), resolved_at = ? WHERE id = ? AND status = 'waiting_confirmation'",
+            (reason, _now_iso(), action_id),
+        )
+        await self.db.conn.commit()
+        return await self.get(action_id)
+
+    async def update_result(self, action_id: str, status: ActionStatus, result: dict | None = None) -> None:
+        await self.db.conn.execute(
+            "UPDATE pending_actions SET status = ?, result = ?, resolved_at = ? WHERE id = ?",
+            (status.value, json.dumps(result) if result else None, _now_iso(), action_id),
+        )
+        await self.db.conn.commit()
+
+    def _row_to_action(self, row) -> PendingAction:
+        return PendingAction(
+            id=row["id"],
+            assignment_id=row["assignment_id"],
+            agent_id=row["agent_id"],
+            event_id=row["event_id"],
+            action_type=row["action_type"],
+            action_data=json.loads(row["action_data"] or "{}"),
+            trust_mode=row["trust_mode"],
+            status=row["status"],
+            policy_reason=row["policy_reason"],
+            result=json.loads(row["result"]) if row["result"] else None,
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
+        )
 
 
 # --- Agent Responses ---

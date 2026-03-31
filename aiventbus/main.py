@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from aiventbus.ai.classifier import EventClassifier
 from aiventbus.ai.context_engine import ContextEngine
 from aiventbus.ai.ollama_client import OllamaClient
 from aiventbus.ai.output_parser import OutputParser
@@ -18,16 +19,23 @@ from aiventbus.config import AppConfig, load_config
 from aiventbus.consumers.llm_agent import LLMAgentConsumer
 from aiventbus.core.assignments import AssignmentManager
 from aiventbus.core.bus import EventBus, WebSocketHub
+from aiventbus.core.executor import Executor
 from aiventbus.core.lifecycle import LifecycleManager
+from aiventbus.core.policy import PolicyEngine
 from aiventbus.storage.db import Database
+from aiventbus.producers.manager import ProducerManager
 from aiventbus.storage.repositories import (
     AgentRepository,
     AssignmentRepository,
     EventRepository,
+    KnowledgeRepository,
     MemoryRepository,
+    PendingActionRepository,
+    ProducerRepository,
     ResponseRepository,
     RoutingRuleRepository,
 )
+from aiventbus.storage.seeder import seed_system_facts
 
 logger = logging.getLogger("aiventbus")
 
@@ -48,6 +56,9 @@ class AgentManager:
         response_repo: ResponseRepository,
         ws_hub: WebSocketHub,
         assignment_manager: AssignmentManager,
+        policy_engine: PolicyEngine | None = None,
+        executor: Executor | None = None,
+        action_repo: PendingActionRepository | None = None,
     ):
         self.bus = bus
         self.ollama = ollama
@@ -60,6 +71,9 @@ class AgentManager:
         self.response_repo = response_repo
         self.ws_hub = ws_hub
         self.assignment_manager = assignment_manager
+        self.policy_engine = policy_engine
+        self.executor = executor
+        self.action_repo = action_repo
         self._consumers: dict[str, LLMAgentConsumer] = {}
 
     async def start_agent(self, agent_id: str) -> bool:
@@ -83,6 +97,9 @@ class AgentManager:
             memory_repo=self.memory_repo,
             response_repo=self.response_repo,
             ws_hub=self.ws_hub,
+            policy_engine=self.policy_engine,
+            executor=self.executor,
+            action_repo=self.action_repo,
         )
         await consumer.start()
         self._consumers[agent_id] = consumer
@@ -122,12 +139,13 @@ _bus: EventBus | None = None
 _ollama: OllamaClient | None = None
 _agent_manager: AgentManager | None = None
 _lifecycle: LifecycleManager | None = None
+_producer_manager: ProducerManager | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic."""
-    global _config, _db, _bus, _ollama, _agent_manager, _lifecycle
+    global _config, _db, _bus, _ollama, _agent_manager, _lifecycle, _producer_manager
 
     # Load config
     _config = load_config()
@@ -150,6 +168,7 @@ async def lifespan(app: FastAPI):
     rule_repo = RoutingRuleRepository(_db)
     memory_repo = MemoryRepository(_db)
     response_repo = ResponseRepository(_db)
+    producer_repo = ProducerRepository(_db)
 
     # Initialize WebSocket hub
     ws_hub = WebSocketHub()
@@ -163,9 +182,42 @@ async def lifespan(app: FastAPI):
     # Initialize core bus
     _bus = EventBus(_config, event_repo, assignment_repo, ws_hub)
 
+    # Initialize knowledge store
+    knowledge_repo = KnowledgeRepository(_db)
+    await seed_system_facts(knowledge_repo)
+
     # Initialize AI modules
-    context_engine = ContextEngine(event_repo, memory_repo)
+    context_engine = ContextEngine(event_repo, memory_repo, knowledge_repo=knowledge_repo)
     output_parser = OutputParser()
+
+    # Initialize policy engine and executor
+    policy_engine = PolicyEngine(trust_overrides=_config.policy.trust_overrides)
+    executor = Executor(shell_timeout=_config.policy.shell_timeout_seconds)
+    action_repo = PendingActionRepository(_db)
+
+    # Register knowledge action handlers in executor
+    async def _handle_set_knowledge(data: dict) -> dict:
+        key = data.get("key", "")
+        value = data.get("value", "")
+        source = data.get("source", "agent")
+        await knowledge_repo.set(key, value, source=source)
+        return {"key": key, "status": "stored"}
+
+    async def _handle_get_knowledge(data: dict) -> dict:
+        key = data.get("key")
+        prefix = data.get("prefix")
+        if key:
+            entry = await knowledge_repo.get(key)
+            if entry:
+                return {"key": entry.key, "value": entry.value}
+            return {"key": key, "error": "not found"}
+        if prefix:
+            entries = await knowledge_repo.scan(prefix)
+            return {"results": [{"key": e.key, "value": e.value} for e in entries]}
+        return {"error": "provide key or prefix"}
+
+    executor.register("set_knowledge", _handle_set_knowledge)
+    executor.register("get_knowledge", _handle_get_knowledge)
 
     # Initialize assignment manager (routing)
     assignment_manager = AssignmentManager(
@@ -175,6 +227,16 @@ async def lifespan(app: FastAPI):
     # Wire the router into the bus and give assignment manager a bus reference
     assignment_manager.set_bus(_bus)
     _bus.set_router(assignment_manager.route_event)
+
+    # Initialize classifier for fallback routing
+    if _config.classifier.enabled:
+        classifier = EventClassifier(
+            ollama=_ollama,
+            model=_config.classifier.model,
+            timeout_seconds=_config.classifier.timeout_seconds,
+        )
+        assignment_manager.set_classifier(classifier)
+        logger.info("Event classifier enabled (model=%s)", _config.classifier.model)
 
     # Initialize lifecycle manager (expiry + retry)
     _lifecycle = LifecycleManager(_db)
@@ -193,19 +255,28 @@ async def lifespan(app: FastAPI):
         response_repo=response_repo,
         ws_hub=ws_hub,
         assignment_manager=assignment_manager,
+        policy_engine=policy_engine,
+        executor=executor,
+        action_repo=action_repo,
     )
 
     # Initialize API modules
-    from aiventbus.api import events, agents, routing_rules, ws, system
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge
 
     events.init(_bus, event_repo, assignment_repo, response_repo)
     agents.init(agent_repo, memory_repo)
     routing_rules.init(rule_repo)
     ws.init(ws_hub)
     system.init(_db, _config)
+    actions.init(action_repo, executor, _bus, ws_hub)
+    knowledge.init(knowledge_repo)
 
     # Start all existing agent consumers
     await _agent_manager.start_all()
+
+    # Initialize and start producers
+    _producer_manager = ProducerManager(bus=_bus, config=_config)
+    await _producer_manager.start_all()
 
     # Check Ollama connectivity
     if await _ollama.is_available():
@@ -219,6 +290,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await _producer_manager.stop_all()
     await _lifecycle.stop()
     await _agent_manager.stop_all()
     await _ollama.close()
@@ -245,13 +317,15 @@ def create_app() -> FastAPI:
     )
 
     # API routes
-    from aiventbus.api import events, agents, routing_rules, ws, system
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge
 
     app.include_router(events.router)
     app.include_router(agents.router)
     app.include_router(routing_rules.router)
     app.include_router(ws.router)
     app.include_router(system.router)
+    app.include_router(actions.router)
+    app.include_router(knowledge.router)
 
     # Static files (Web UI)
     static_dir = Path(__file__).parent / "static"

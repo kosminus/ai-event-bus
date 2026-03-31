@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     context_refs TEXT DEFAULT '[]',
     memory_scope TEXT,
     source TEXT,
+    trace_id TEXT,
     status TEXT DEFAULT 'received',
     producer_id TEXT,
     expires_at TEXT,
@@ -37,6 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_events_semantic_type ON events(semantic_type);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_events_dedupe_key ON events(dedupe_key);
 CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent_event);
+CREATE INDEX IF NOT EXISTS idx_events_trace ON events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 
 -- Agents (consumers)
@@ -96,6 +98,7 @@ CREATE TABLE IF NOT EXISTS event_assignments (
     event_id TEXT NOT NULL REFERENCES events(id),
     agent_id TEXT NOT NULL REFERENCES agents(id),
     status TEXT DEFAULT 'pending',
+    lane TEXT DEFAULT 'ambient',
     retry_count INTEGER DEFAULT 0,
     model_used TEXT,
     token_budget INTEGER,
@@ -107,6 +110,7 @@ CREATE TABLE IF NOT EXISTS event_assignments (
 CREATE INDEX IF NOT EXISTS idx_assignments_event ON event_assignments(event_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_agent ON event_assignments(agent_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_status ON event_assignments(status);
+CREATE INDEX IF NOT EXISTS idx_assignments_lane ON event_assignments(agent_id, status, lane, created_at);
 
 -- Agent memory (transcript)
 CREATE TABLE IF NOT EXISTS agent_memory (
@@ -147,6 +151,32 @@ CREATE TABLE IF NOT EXISTS agent_responses (
 );
 CREATE INDEX IF NOT EXISTS idx_responses_assignment ON agent_responses(assignment_id);
 CREATE INDEX IF NOT EXISTS idx_responses_agent ON agent_responses(agent_id);
+
+-- Knowledge store (durable key-value facts)
+CREATE TABLE IF NOT EXISTS knowledge (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    source TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Pending actions (confirmation queue)
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id TEXT PRIMARY KEY,
+    assignment_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_data TEXT NOT NULL DEFAULT '{}',
+    trust_mode TEXT DEFAULT 'confirm',
+    status TEXT DEFAULT 'pending',
+    policy_reason TEXT,
+    result TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status);
+CREATE INDEX IF NOT EXISTS idx_pending_agent ON pending_actions(agent_id);
 """
 
 
@@ -166,7 +196,26 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA_SQL)
         await self._conn.commit()
+        await self._run_migrations()
         logger.info("Database initialized at %s", self.db_path)
+
+    async def _run_migrations(self) -> None:
+        """Apply schema migrations for existing databases."""
+        # Add lane column to event_assignments if missing
+        cursor = await self._conn.execute("PRAGMA table_info(event_assignments)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "lane" not in columns:
+            await self._conn.execute("ALTER TABLE event_assignments ADD COLUMN lane TEXT DEFAULT 'ambient'")
+            await self._conn.commit()
+            logger.info("Migration: added 'lane' column to event_assignments")
+
+        # Add trace_id column to events if missing
+        cursor = await self._conn.execute("PRAGMA table_info(events)")
+        event_columns = {row[1] for row in await cursor.fetchall()}
+        if "trace_id" not in event_columns:
+            await self._conn.execute("ALTER TABLE events ADD COLUMN trace_id TEXT")
+            await self._conn.commit()
+            logger.info("Migration: added 'trace_id' column to events")
 
     async def close(self) -> None:
         """Close the database connection."""

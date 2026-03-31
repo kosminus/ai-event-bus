@@ -1,0 +1,20 @@
+[package]
+name = "aiventbus-widget"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop widget for aiventbus — local AI control plane"
+
+[lib]
+name = "aiventbus_widget"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

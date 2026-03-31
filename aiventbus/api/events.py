@@ -41,6 +41,15 @@ async def list_events(
     return await _event_repo.list(topic=topic, status=status, limit=limit, offset=offset)
 
 
+@router.get("/trace/{trace_id}", response_model=list[Event])
+async def get_trace(trace_id: str):
+    """Get all events in a trace, ordered by timestamp."""
+    events = await _event_repo.get_by_trace_id(trace_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return events
+
+
 @router.get("/{event_id}", response_model=Event)
 async def get_event(event_id: str):
     """Get a single event by ID."""

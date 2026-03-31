@@ -10,8 +10,8 @@ import json
 import logging
 from typing import Any
 
-from aiventbus.models import Agent, Event, EventAssignment
-from aiventbus.storage.repositories import EventRepository, MemoryRepository
+from aiventbus.models import Agent, Event, EventAssignment, KnowledgeEntry
+from aiventbus.storage.repositories import EventRepository, KnowledgeRepository, MemoryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,10 @@ DEFAULT_TOKEN_BUDGET = 4096
 class ContextEngine:
     """Builds prompts for LLM agents with relevant context."""
 
-    def __init__(self, event_repo: EventRepository, memory_repo: MemoryRepository):
+    def __init__(self, event_repo: EventRepository, memory_repo: MemoryRepository, knowledge_repo: KnowledgeRepository | None = None):
         self.event_repo = event_repo
         self.memory_repo = memory_repo
+        self.knowledge_repo = knowledge_repo
 
     async def build_prompt(
         self,
@@ -55,6 +56,18 @@ class ContextEngine:
             if used_tokens + facts_tokens < token_budget * 0.3:  # Max 30% for facts
                 messages.append({"role": "system", "content": facts_text})
                 used_tokens += facts_tokens
+
+        # 2.5. Knowledge store facts
+        if self.knowledge_repo:
+            knowledge = await self._get_relevant_knowledge(event, agent)
+            if knowledge:
+                knowledge_text = "## Known Facts\n" + "\n".join(
+                    f"- **{k.key}**: {k.value}" for k in knowledge
+                )
+                knowledge_tokens = self._estimate_tokens(knowledge_text)
+                if used_tokens + knowledge_tokens < token_budget * 0.2:
+                    messages.append({"role": "system", "content": knowledge_text})
+                    used_tokens += knowledge_tokens
 
         # 3. Recent memory (conversation history)
         memory = await self.memory_repo.get_recent(agent.id, scope, limit=20)
@@ -99,10 +112,17 @@ class ContextEngine:
             '  "confidence": 0.0 to 1.0,\n'
             '  "proposed_actions": [\n'
             '    {\n'
-            '      "action_type": "emit_event" | "log" | "alert",\n'
+            '      "action_type": "emit_event" | "log" | "alert" | "notify" | "shell_exec" | "file_read" | "file_write" | "file_delete" | "open_app" | "set_knowledge" | "get_knowledge",\n'
             '      "topic": "optional.topic.for.emit_event",\n'
             '      "payload": {},\n'
-            '      "message": "optional message for log/alert"\n'
+            '      "message": "optional message for log/alert/notify",\n'
+            '      "title": "optional title for notify (desktop notification)",\n'
+            '      "command": "shell command for shell_exec",\n'
+            '      "path": "file path for file_read/file_write/file_delete",\n'
+            '      "content": "file content for file_write",\n'
+            '      "target": "URL or path for open_app",\n'
+            '      "key": "dot.separated.key for set_knowledge/get_knowledge",\n'
+            '      "value": "value string for set_knowledge"\n'
             '    }\n'
             '  ]\n'
             '}\n'
@@ -156,6 +176,33 @@ class ContextEngine:
         if not resolved:
             return None
         return "## Related Context\n" + "\n".join(resolved)
+
+    async def _get_relevant_knowledge(self, event: Event, agent: Agent) -> list[KnowledgeEntry]:
+        """Retrieve relevant knowledge entries for the current context."""
+        entries: list[KnowledgeEntry] = []
+        seen_keys: set[str] = set()
+
+        async def _add_scan(prefix: str) -> None:
+            for entry in await self.knowledge_repo.scan(prefix):
+                if entry.key not in seen_keys:
+                    seen_keys.add(entry.key)
+                    entries.append(entry)
+
+        # Always include system facts (small, always useful)
+        await _add_scan("system.")
+
+        # Topic-based: clipboard.text → scan clipboard.*
+        topic_root = event.topic.split(".")[0]
+        if topic_root != "system":
+            await _add_scan(f"{topic_root}.")
+
+        # Agent-specific knowledge
+        await _add_scan(f"agent.{agent.id}.")
+
+        # User preferences
+        await _add_scan("user.")
+
+        return entries
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate."""
