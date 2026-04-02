@@ -63,7 +63,8 @@ class TerminalMonitorProducer(BaseProducer):
         self._running = True
         # Initialize to current end of file so we only emit new commands
         self._last_size = self._history_path.stat().st_size
-        self._last_line_count = sum(1 for _ in open(self._history_path, "rb"))
+        with open(self._history_path, "rb") as f:
+            self._last_line_count = sum(1 for _ in f)
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("Terminal monitor started (watching %s)", self._history_path)
 

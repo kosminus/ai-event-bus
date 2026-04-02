@@ -7,7 +7,11 @@ import logging
 import mimetypes
 from pathlib import Path
 
-from watchfiles import awatch, Change
+try:
+    from watchfiles import awatch, Change
+    _HAS_WATCHFILES = True
+except ImportError:
+    _HAS_WATCHFILES = False
 
 from aiventbus.core.bus import EventBus
 from aiventbus.models import EventCreate, Priority
@@ -41,6 +45,9 @@ class FileWatcherProducer(BaseProducer):
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
+        if not _HAS_WATCHFILES:
+            logger.warning("watchfiles not installed — file watcher disabled (pip install watchfiles)")
+            return
         existing = [p for p in self.watch_paths if Path(p).exists()]
         if not existing:
             logger.warning("File watcher: no valid paths to watch from %s", self.watch_paths)

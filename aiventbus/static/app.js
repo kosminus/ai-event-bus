@@ -15,6 +15,7 @@ const state = {
     currentView: 'dashboard',
     selectedEvent: null,
     ws: null,
+    producers: [],
     agentStreams: {},  // agent_id -> current streaming text
 };
 
@@ -123,6 +124,13 @@ async function refreshData() {
     } catch (e) {
         console.error('Refresh failed:', e);
     }
+    // Fetch producers separately so a failure doesn't block the rest
+    try {
+        state.producers = await api('/producers');
+        if (state.currentView === 'producers') renderProducers();
+    } catch (e) {
+        console.debug('Producers fetch failed:', e);
+    }
 }
 
 // --- Rendering ---
@@ -152,6 +160,7 @@ function renderMain() {
         case 'dashboard': renderDashboard(main); break;
         case 'events': renderEventsView(main); break;
         case 'agents': renderAgentsView(main); break;
+        case 'producers': renderProducersView(main); break;
         case 'config': renderConfigView(main); break;
         case 'event-detail': renderEventDetail(main); break;
     }
@@ -560,6 +569,56 @@ async function testAgent(agentId) {
         }),
     });
     showToast(`Test event sent to ${agent.name}`, 'success');
+}
+
+// --- Producers ---
+function renderProducersView(el) {
+    el.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h2 style="font-size:16px">Producers</h2>
+        </div>
+        <div class="producers-grid" id="producers-grid"></div>
+    `;
+    renderProducers();
+}
+
+function renderProducers() {
+    const el = document.getElementById('producers-grid');
+    if (!el) return;
+
+    if (state.producers.length === 0) {
+        el.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px">No producers available</div>';
+        return;
+    }
+
+    el.innerHTML = state.producers.map(p => `
+        <div class="producer-card">
+            <div class="agent-status-indicator ${p.running ? 'idle' : 'disabled'}"></div>
+            <div class="agent-name">${p.name}</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">${escapeHtml(p.description)}</div>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+                <span class="event-status ${p.running ? 'completed' : 'expired'}">${p.running ? 'running' : 'stopped'}</span>
+                <span class="capability-tag">${p.type}</span>
+            </div>
+            <div style="margin-top:8px">
+                ${p.running
+                    ? `<button class="btn btn-sm btn-danger" onclick="toggleProducer('${p.name}', false)">Disable</button>`
+                    : `<button class="btn btn-sm btn-primary" onclick="toggleProducer('${p.name}', true)">Enable</button>`
+                }
+            </div>
+        </div>
+    `).join('');
+}
+
+async function toggleProducer(name, enable) {
+    try {
+        const action = enable ? 'enable' : 'disable';
+        await api(`/producers/${name}/${action}`, { method: 'POST' });
+        showToast(`Producer ${name} ${enable ? 'enabled' : 'disabled'}`, 'success');
+        refreshData();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
 }
 
 // --- Navigation ---

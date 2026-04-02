@@ -273,6 +273,47 @@ def knowledge_list(ctx, prefix: str | None):
         click.echo(f"  {entry['key']:40s} = {entry['value']}")
 
 
+@cli.command("shell-hook")
+@click.option("--install", is_flag=True, help="Add to your shell rc file automatically")
+@click.pass_context
+def shell_hook(ctx, install: bool):
+    """Print the shell preexec hook script.
+
+    Usage:
+        eval "$(aibus shell-hook)"          # activate in current shell
+        aibus shell-hook --install          # append to ~/.bashrc or ~/.zshrc
+    """
+    import os
+    from pathlib import Path
+
+    hook_path = Path(__file__).parent / "shell_hook.sh"
+    hook_source = hook_path.read_text()
+
+    if not install:
+        click.echo(hook_source)
+        return
+
+    # Detect shell rc file
+    shell = os.environ.get("SHELL", "/bin/bash")
+    if "zsh" in shell:
+        rc_file = Path.home() / ".zshrc"
+    else:
+        rc_file = Path.home() / ".bashrc"
+
+    marker = '# AI Event Bus preexec hook'
+    line = f'\n{marker}\neval "$(aibus shell-hook)"\n'
+
+    # Check if already installed
+    if rc_file.exists() and marker in rc_file.read_text():
+        click.echo(f"Already installed in {rc_file}")
+        return
+
+    with open(rc_file, "a") as f:
+        f.write(line)
+    click.echo(f"Installed in {rc_file}")
+    click.echo(f"Run: source {rc_file}")
+
+
 def main():
     cli(obj={})
 

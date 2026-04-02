@@ -51,6 +51,10 @@ class ProducersConfig:
     dbus_enabled: bool = False
     terminal_monitor_enabled: bool = False
     terminal_history_path: str | None = None
+    journald_enabled: bool = False
+    journald_filter_noise: bool = True
+    journald_priority_filter: int = 4  # 4=warning+, 3=error+, 7=all (auth always passes)
+    journald_units: list = field(default_factory=list)  # e.g. ["sshd", "docker"]
 
 
 @dataclass
@@ -84,6 +88,7 @@ class AppConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     lanes: LaneConfig = field(default_factory=LaneConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    seed_defaults: bool = True
 
 
 def _merge_dict(base: dict, override: dict) -> dict:
@@ -122,4 +127,5 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         policy=PolicyConfig(**raw.get("policy", {})),
         lanes=LaneConfig(**raw.get("lanes", {})),
         classifier=ClassifierConfig(**raw.get("classifier", {})),
+        seed_defaults=raw.get("seed_defaults", True),
     )

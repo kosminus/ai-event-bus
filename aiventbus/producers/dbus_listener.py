@@ -24,6 +24,7 @@ class DBusListenerProducer(BaseProducer):
         self._task: asyncio.Task | None = None
         self._running = False
         self._dbus_conn = None
+        self._signal_conn = None
 
     async def start(self) -> None:
         self._running = True
@@ -32,9 +33,11 @@ class DBusListenerProducer(BaseProducer):
 
     async def stop(self) -> None:
         self._running = False
-        if self._dbus_conn:
-            self._dbus_conn.disconnect()
-            self._dbus_conn = None
+        for conn in (self._dbus_conn, self._signal_conn):
+            if conn:
+                conn.disconnect()
+        self._dbus_conn = None
+        self._signal_conn = None
         if self._task:
             self._task.cancel()
             try:
@@ -52,25 +55,43 @@ class DBusListenerProducer(BaseProducer):
             from dbus_fast.aio import MessageBus
             from dbus_fast import MessageType, Message
 
+            # We need TWO connections:
+            # 1. A monitor connection (becomes read-only) to eavesdrop on Notify method calls
+            # 2. A normal connection for signal subscriptions (lock/unlock)
+
+            # --- Monitor connection for notifications ---
             self._dbus_conn = await MessageBus().connect()
 
-            # Subscribe to desktop notifications
-            await self._dbus_conn.call(
-                Message(
-                    destination="org.freedesktop.DBus",
-                    path="/org/freedesktop/DBus",
-                    interface="org.freedesktop.DBus",
-                    member="AddMatch",
-                    signature="s",
-                    body=[
-                        "type='method_call',interface='org.freedesktop.Notifications',member='Notify'"
-                    ],
-                )
-            )
-
-            # Subscribe to session lock/unlock
-            for member in ("Lock", "Unlock"):
+            monitor_rules = [
+                "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
+            ]
+            try:
                 await self._dbus_conn.call(
+                    Message(
+                        destination="org.freedesktop.DBus",
+                        path="/org/freedesktop/DBus",
+                        interface="org.freedesktop.DBus.Monitoring",
+                        member="BecomeMonitor",
+                        signature="asu",
+                        body=[monitor_rules, 0],
+                    )
+                )
+                logger.info("DBus: using Monitor interface for notification capture")
+            except Exception as e:
+                # Fallback for older dbus-daemon without Monitor support
+                logger.warning("DBus: BecomeMonitor failed (%s), notifications may not be captured", e)
+
+            def monitor_handler(msg: Message) -> None:
+                if msg.member == "Notify" and msg.interface == "org.freedesktop.Notifications":
+                    asyncio.create_task(self._handle_notification(msg))
+
+            self._dbus_conn.add_message_handler(monitor_handler)
+
+            # --- Signal connection for session lock/unlock ---
+            self._signal_conn = await MessageBus().connect()
+
+            for member in ("Lock", "Unlock"):
+                await self._signal_conn.call(
                     Message(
                         destination="org.freedesktop.DBus",
                         path="/org/freedesktop/DBus",
@@ -83,16 +104,14 @@ class DBusListenerProducer(BaseProducer):
                     )
                 )
 
-            def message_handler(msg: Message) -> None:
-                if msg.message_type == MessageType.METHOD_CALL and msg.member == "Notify":
-                    asyncio.create_task(self._handle_notification(msg))
-                elif msg.message_type == MessageType.SIGNAL:
+            def signal_handler(msg: Message) -> None:
+                if msg.message_type == MessageType.SIGNAL:
                     if msg.member == "Lock":
                         asyncio.create_task(self._handle_session_event("session.locked"))
                     elif msg.member == "Unlock":
                         asyncio.create_task(self._handle_session_event("session.unlocked"))
 
-            self._dbus_conn.add_message_handler(message_handler)
+            self._signal_conn.add_message_handler(signal_handler)
 
             # Keep alive until stopped
             while self._running:

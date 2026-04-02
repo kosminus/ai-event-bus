@@ -35,6 +35,7 @@ from aiventbus.storage.repositories import (
     ResponseRepository,
     RoutingRuleRepository,
 )
+from aiventbus.storage.seed_defaults import seed_defaults
 from aiventbus.storage.seeder import seed_system_facts
 
 logger = logging.getLogger("aiventbus")
@@ -186,6 +187,10 @@ async def lifespan(app: FastAPI):
     knowledge_repo = KnowledgeRepository(_db)
     await seed_system_facts(knowledge_repo)
 
+    # Seed default agents and routing rules (on first run)
+    if _config.seed_defaults:
+        await seed_defaults(agent_repo, rule_repo)
+
     # Initialize AI modules
     context_engine = ContextEngine(event_repo, memory_repo, knowledge_repo=knowledge_repo)
     output_parser = OutputParser()
@@ -261,7 +266,7 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize API modules
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers
 
     events.init(_bus, event_repo, assignment_repo, response_repo)
     agents.init(agent_repo, memory_repo)
@@ -271,12 +276,13 @@ async def lifespan(app: FastAPI):
     actions.init(action_repo, executor, _bus, ws_hub)
     knowledge.init(knowledge_repo)
 
-    # Start all existing agent consumers
-    await _agent_manager.start_all()
-
     # Initialize and start producers
     _producer_manager = ProducerManager(bus=_bus, config=_config)
+    producers.init(_producer_manager)
     await _producer_manager.start_all()
+
+    # Start all existing agent consumers
+    await _agent_manager.start_all()
 
     # Check Ollama connectivity
     if await _ollama.is_available():
@@ -317,7 +323,7 @@ def create_app() -> FastAPI:
     )
 
     # API routes
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers
 
     app.include_router(events.router)
     app.include_router(agents.router)
@@ -326,6 +332,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(actions.router)
     app.include_router(knowledge.router)
+    app.include_router(producers.router)
 
     # Static files (Web UI)
     static_dir = Path(__file__).parent / "static"
