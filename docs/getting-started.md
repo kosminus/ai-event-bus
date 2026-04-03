@@ -7,7 +7,7 @@ This guide walks you through installing aiventbus, creating your first agent, an
 - **Python 3.11+**
 - **Ollama** running locally — install from [ollama.com](https://ollama.com), then pull a model:
   ```bash
-  ollama pull gemma3:latest
+  ollama pull gemma4:latest
   ```
 
 ## Installation
@@ -33,40 +33,17 @@ Clipboard producer started
 
 The daemon is now running. Open [http://localhost:8420](http://localhost:8420) to see the web dashboard.
 
-## Create your first agent
+On first run, the bus automatically seeds **8 default agents** (General Assistant, Clipboard Analyzer, File Watcher Agent, Notification Summarizer, Terminal Helper, System Log Analyst, Webhook Handler, Scheduled Task Agent) and **9 routing rules** mapping topic patterns to agents. You're ready to go immediately.
 
-An agent is an LLM that processes events. Let's create one:
+Check the auto-seeded system knowledge:
 
 ```bash
 aibus knowledge list --prefix system.
 ```
 
-You'll see the system already knows about your machine (hostname, GPU, memory, OS). Now create an agent:
+You'll see the system already knows about your machine (hostname, GPU, memory, OS).
 
-```bash
-curl -X POST http://localhost:8420/api/v1/agents \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "assistant",
-    "model": "gemma3:latest",
-    "description": "General-purpose assistant for answering questions",
-    "system_prompt": "You are a helpful AI assistant running on the user machine. Answer concisely."
-  }'
-```
-
-## Create a routing rule
-
-Tell the bus which events go to your agent:
-
-```bash
-curl -X POST http://localhost:8420/api/v1/routing-rules \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "user queries to assistant",
-    "topic_pattern": "user.*",
-    "consumer_id": "agent_assistant"
-  }'
-```
+> **Note:** To disable auto-seeding, set `seed_defaults: false` in `config.yaml`. You can also create additional agents and routing rules manually via the API — see the [Developer Guide](developer-guide.md).
 
 ## Ask a question
 
@@ -85,12 +62,12 @@ You can also ask from the web dashboard (publish an event with topic `user.query
 ```
 1. You typed a question
 2. CLI published a user.query event to the bus
-3. Routing rule matched it to your assistant agent
+3. Default routing rule matched `user.*` to the General Assistant agent
 4. Context engine built a prompt with:
    - Agent's system prompt
    - System facts from knowledge store (your GPU, OS, memory)
    - The question
-5. Agent called Ollama (gemma3), streamed the response
+5. Agent called Ollama (gemma4), streamed the response
 6. Response parsed as structured JSON
 7. CLI displayed the summary
 ```
@@ -117,25 +94,18 @@ producers:
 
 Restart the daemon. Now file changes in Downloads and terminal commands will flow through the bus.
 
-## Add routing rules for producers
+## Routing rules
+
+The default seeder already creates routing rules for all built-in producers (`clipboard.*`, `fs.*`, `notification.*`, `terminal.*`, `syslog.*`, `webhook.*`, `cron.*`). To add custom rules:
 
 ```bash
-# Route file events to a triage agent
+# Route custom topic to a specific agent
 curl -X POST http://localhost:8420/api/v1/routing-rules \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "file events",
-    "topic_pattern": "fs.*",
-    "consumer_id": "agent_assistant"
-  }'
-
-# Route clipboard events
-curl -X POST http://localhost:8420/api/v1/routing-rules \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "clipboard events",
-    "topic_pattern": "clipboard.*",
-    "consumer_id": "agent_assistant"
+    "name": "my custom rule",
+    "topic_pattern": "my.custom.*",
+    "consumer_id": "<agent_id>"
   }'
 ```
 
@@ -146,7 +116,7 @@ Instead of writing routing rules for everything, enable the LLM classifier. It a
 ```yaml
 classifier:
   enabled: true
-  model: "gemma3:latest"
+  model: "gemma4:latest"
 ```
 
 ## Desktop widget

@@ -140,7 +140,9 @@ Action type registry. Each action type has a handler function. Built-in handlers
 - `file_read` / `file_write` / `file_delete` → pathlib operations
 - `notify` → `notify-send` subprocess
 - `open_app` → `xdg-open`
+- `http_request` → `httpx.AsyncClient` with configurable timeout and response size cap
 - `set_knowledge` / `get_knowledge` → knowledge store operations
+- `tool_call` → dispatches to registered `ToolBackend` plugins (e.g. Playwright)
 
 Register custom handlers: `executor.register("my_action", handler_fn)`
 
