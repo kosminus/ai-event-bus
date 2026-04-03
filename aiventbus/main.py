@@ -20,6 +20,7 @@ from aiventbus.consumers.llm_agent import LLMAgentConsumer
 from aiventbus.core.assignments import AssignmentManager
 from aiventbus.core.bus import EventBus, WebSocketHub
 from aiventbus.core.executor import Executor
+from aiventbus.core.tools import ToolRegistry
 from aiventbus.core.lifecycle import LifecycleManager
 from aiventbus.core.policy import PolicyEngine
 from aiventbus.storage.db import Database
@@ -191,13 +192,15 @@ async def lifespan(app: FastAPI):
     if _config.seed_defaults:
         await seed_defaults(agent_repo, rule_repo)
 
-    # Initialize AI modules
-    context_engine = ContextEngine(event_repo, memory_repo, knowledge_repo=knowledge_repo)
-    output_parser = OutputParser()
-
-    # Initialize policy engine and executor
+    # Initialize policy engine, tool registry, and executor
     policy_engine = PolicyEngine(trust_overrides=_config.policy.trust_overrides)
-    executor = Executor(shell_timeout=_config.policy.shell_timeout_seconds)
+    tool_registry = ToolRegistry()
+    executor = Executor(
+        shell_timeout=_config.policy.shell_timeout_seconds,
+        tool_registry=tool_registry,
+        http_timeout=_config.tools.http_request_timeout,
+        http_max_size=_config.tools.http_request_max_size,
+    )
     action_repo = PendingActionRepository(_db)
 
     # Register knowledge action handlers in executor
@@ -223,6 +226,24 @@ async def lifespan(app: FastAPI):
 
     executor.register("set_knowledge", _handle_set_knowledge)
     executor.register("get_knowledge", _handle_get_knowledge)
+
+    # Register tool backends
+    _playwright_backend = None
+    if _config.tools.playwright_enabled:
+        try:
+            from aiventbus.tools.playwright_backend import PlaywrightBackend
+            _playwright_backend = PlaywrightBackend(
+                headless=_config.tools.playwright_headless,
+                timeout=_config.tools.playwright_timeout,
+            )
+            tool_registry.register(_playwright_backend)
+            logger.info("Playwright tool backend enabled (headless=%s)", _config.tools.playwright_headless)
+        except ImportError:
+            logger.warning("Playwright not installed — pip install playwright && playwright install chromium")
+
+    # Initialize AI modules (executor passed for dynamic prompt generation)
+    context_engine = ContextEngine(event_repo, memory_repo, knowledge_repo=knowledge_repo, executor=executor)
+    output_parser = OutputParser()
 
     # Initialize assignment manager (routing)
     assignment_manager = AssignmentManager(
@@ -301,6 +322,8 @@ async def lifespan(app: FastAPI):
     await _producer_manager.stop_all()
     await _lifecycle.stop()
     await _agent_manager.stop_all()
+    if _playwright_backend:
+        await _playwright_backend.close()
     await _ollama.close()
     await _db.close()
     logger.info("AI Event Bus stopped")

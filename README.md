@@ -23,7 +23,8 @@ Existing AI agent frameworks (LangChain, CrewAI) are request/response. This is e
 
 - **System producers** — clipboard monitor, file watcher, DBus listener, terminal monitor give the daemon eyes and ears
 - **Structured agent output** — LLMs return typed JSON with actions, not free text
-- **Policy-gated execution** — agents propose actions (shell commands, file ops), a policy engine gates them (blocklist → allowlist → confirm)
+- **Policy-gated execution** — agents propose actions (shell commands, file ops, HTTP requests), a policy engine gates them (blocklist → allowlist → confirm)
+- **Pluggable tool backends** — extend agents with external tools (Playwright, MCP servers, custom APIs) via a simple `ToolBackend` interface
 - **Chain reactions** — agent output becomes a new event that triggers other agents
 - **Priority lanes** — user queries never wait behind background clipboard events
 - **Knowledge store** — durable key-value facts shared across all agents
@@ -159,7 +160,9 @@ aiventbus hooks into the OS to observe and act:
 | **Terminal** | Shell history monitoring | Watches bash/zsh history, agents can detect errors and suggest fixes |
 | **Shell commands** | `asyncio.subprocess` | Agents propose commands, policy engine gates them, executor runs approved ones |
 | **File operations** | Python pathlib | Agents can read/write/delete files (with policy confirmation) |
+| **HTTP requests** | `httpx` | Agents can fetch data from web APIs and URLs (auto-approved by default) |
 | **App launching** | `xdg-open` | Agents can open URLs and files in default applications |
+| **External tools** | ToolBackend plugins | Agents can call registered tool backends (Playwright, MCP, custom) via `tool_call` |
 
 ## Event schema
 
@@ -209,9 +212,11 @@ Agents return structured JSON with action proposals:
 }
 ```
 
-Action types: `emit_event`, `log`, `alert`, `notify`, `shell_exec`, `file_read`, `file_write`, `file_delete`, `open_app`, `set_knowledge`, `get_knowledge`.
+**Built-in action types:** `emit_event`, `log`, `alert`, `notify`, `shell_exec`, `file_read`, `file_write`, `file_delete`, `open_app`, `http_request`, `set_knowledge`, `get_knowledge`, `tool_call`.
 
-Actions go through the policy engine: auto-approved (safe commands), confirm (needs user approval), or deny (blocked patterns like `rm -rf /`, `sudo`).
+Actions go through the policy engine: auto-approved (safe commands, HTTP requests), confirm (needs user approval — shell, file writes, tool calls), or deny (blocked patterns like `rm -rf /`, `sudo`).
+
+Agent prompts are generated dynamically — they list only the action types actually available (including any registered tool backends). If an agent proposes an unknown action type, the bus emits a `system.unknown_action` event instead of failing silently.
 
 ## Architecture
 
@@ -244,10 +249,85 @@ Actions go through the policy engine: auto-approved (safe commands), confirm (ne
       └────────┬────────────┘
                ▼
       ┌────────────────────┐
-      │     EXECUTOR        │  Shell, filesystem, notifications
+      │     EXECUTOR        │  Shell, filesystem, HTTP, notifications
+      │                      │  + pluggable tool backends
       └────────┬────────────┘
                ▼
         back to EVENT BUS (chain reactions)
+```
+
+## Tool backends
+
+Agents can call external tools through the pluggable `ToolBackend` system. Tool backends register with the executor and are automatically advertised in agent prompts — the LLM sees what tools are available and how to call them.
+
+### Writing a tool backend
+
+```python
+from aiventbus.core.tools import ToolBackend, ToolMethod
+
+class PlaywrightBackend(ToolBackend):
+    @property
+    def name(self):
+        return "playwright"
+
+    @property
+    def description(self):
+        return "Browser automation — navigate pages, extract text, take screenshots"
+
+    def methods(self):
+        return [
+            ToolMethod("goto", "Navigate to a URL", {"url": "full URL string"}),
+            ToolMethod("get_text", "Extract text from the page", {"selector": "CSS selector"}),
+            ToolMethod("screenshot", "Take a screenshot", {"path": "output file path"}),
+        ]
+
+    async def call(self, method, params):
+        if method == "goto":
+            page = await self.browser.new_page()
+            await page.goto(params["url"])
+            return {"status": "ok", "title": await page.title()}
+        # ... handle other methods
+```
+
+### Registering a backend
+
+Register tool backends in `main.py` (or via a future plugin API):
+
+```python
+executor.tool_registry.register(PlaywrightBackend())
+```
+
+### How agents use tools
+
+The agent's system prompt automatically includes registered tools. Agents propose `tool_call` actions:
+
+```json
+{
+  "action_type": "tool_call",
+  "tool": "playwright",
+  "method": "goto",
+  "params": {"url": "https://weather.example.com/bucharest"}
+}
+```
+
+Tool calls go through the policy engine (`confirm` by default — requires user approval). Override in config:
+
+```yaml
+policy:
+  trust_overrides:
+    tool_call: "auto"   # auto-approve all tool calls
+```
+
+### Built-in: HTTP requests
+
+The `http_request` action type is built-in — no tool backend needed. Agents can fetch external data directly:
+
+```json
+{
+  "action_type": "http_request",
+  "url": "https://api.weather.com/v1/current?city=bucharest",
+  "method": "GET"
+}
 ```
 
 ## Configuration
@@ -275,6 +355,11 @@ producers:
   file_watcher_paths: ["~/Downloads", "~/Documents"]
   dbus_enabled: false
   terminal_monitor_enabled: false
+
+tools:
+  http_request_enabled: true
+  http_request_timeout: 30         # seconds
+  http_request_max_size: 1048576   # 1MB response cap
 
 classifier:
   enabled: false

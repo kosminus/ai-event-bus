@@ -55,7 +55,8 @@ aiventbus/
 │   ├── assignments.py       # Pull-based routing + assignment creation + priority lanes
 │   ├── lifecycle.py         # Expiry sweeper, retry scheduler
 │   ├── policy.py            # Policy engine: blocklist, allowlist, trust modes
-│   ├── executor.py          # Action executor: shell, file, notify, knowledge
+│   ├── executor.py          # Action executor: shell, file, notify, http_request, tool_call
+│   ├── tools.py             # ToolBackend base class + ToolRegistry for pluggable tools
 │   └── compression.py       # Backpressure (not yet implemented)
 ├── ai/
 │   ├── context_engine.py    # Builds token-bounded prompts with memory + refs + knowledge
@@ -117,6 +118,8 @@ widget/
 - **Priority lanes**: interactive (user.*) > critical (security.*) > ambient (everything else)
 - **Structured agent output**: LLMs return `{type, summary, confidence, proposed_actions}` JSON
 - **Policy-gated execution**: agents propose actions → policy engine (blocklist → allowlist → trust mode) → executor or confirmation queue
+- **Pluggable tool backends**: external tools (Playwright, MCP, custom APIs) register via `ToolBackend` → dispatched through `tool_call` action type
+- **Dynamic agent prompts**: available action types generated from executor + tool registry, not hardcoded
 - **Chain reactions**: agent `emit_event` actions publish back to the bus with `parent_event` lineage and inherited `trace_id`
 - **Knowledge store**: durable key-value facts in SQLite, auto-seeded with system info, injected into prompts
 - **Classifier fallback**: unmatched events optionally routed by a lightweight LLM classifier
@@ -232,7 +235,8 @@ Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only ru
 - Priority lanes (interactive/critical/ambient) with capacity reservation
 - LLM agent consumers via Ollama (streaming)
 - Policy engine (blocklist, allowlist, trust modes: auto/confirm/deny)
-- Executor (shell_exec, file_read, file_write, file_delete, notify, open_app)
+- Executor (shell_exec, file_read, file_write, file_delete, notify, open_app, http_request, tool_call)
+- Pluggable tool backend system (ToolBackend + ToolRegistry) for external tools
 - Confirmation queue with approve/deny API and web UI (Approvals tab with history)
 - Context engine (memory, pinned facts, knowledge store, ref resolution)
 - Knowledge store with system facts auto-seeder

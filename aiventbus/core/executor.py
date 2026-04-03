@@ -2,6 +2,9 @@
 
 Each action type has a registered handler. The executor never evaluates policy —
 it only executes what has been approved.
+
+Supports pluggable tool backends via ToolRegistry for external tools
+(Playwright, MCP servers, HTTP APIs, etc.).
 """
 
 from __future__ import annotations
@@ -11,6 +14,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
+import httpx
+
+from aiventbus.core.tools import ToolRegistry
+
 logger = logging.getLogger(__name__)
 
 ActionHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -19,9 +26,13 @@ ActionHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 class Executor:
     """Dispatches approved actions to registered handlers."""
 
-    def __init__(self, shell_timeout: int = 30):
+    def __init__(self, shell_timeout: int = 30, tool_registry: ToolRegistry | None = None,
+                 http_timeout: int = 30, http_max_size: int = 1_048_576):
         self._handlers: dict[str, ActionHandler] = {}
         self._shell_timeout = shell_timeout
+        self._http_timeout = http_timeout
+        self._http_max_size = http_max_size
+        self.tool_registry = tool_registry or ToolRegistry()
         self._register_builtins()
 
     def register(self, action_type: str, handler: ActionHandler) -> None:
@@ -40,6 +51,88 @@ class Executor:
     def has_handler(self, action_type: str) -> bool:
         return action_type in self._handlers
 
+    def list_available_actions(self) -> list[dict[str, Any]]:
+        """Return metadata about all available action types for prompt generation."""
+        actions = []
+
+        # Built-in action types
+        builtin_docs = {
+            "shell_exec": {
+                "description": "Execute a shell command",
+                "params": {"command": "shell command string", "cwd": "(optional) working directory", "timeout": "(optional) seconds"},
+            },
+            "file_read": {
+                "description": "Read a file's contents",
+                "params": {"path": "absolute file path"},
+            },
+            "file_write": {
+                "description": "Write content to a file",
+                "params": {"path": "absolute file path", "content": "file content string"},
+            },
+            "file_delete": {
+                "description": "Delete a file",
+                "params": {"path": "absolute file path"},
+            },
+            "notify": {
+                "description": "Send a desktop notification",
+                "params": {"title": "(optional) notification title", "message": "notification body"},
+            },
+            "open_app": {
+                "description": "Open a URL or file with the default application",
+                "params": {"target": "URL or file path"},
+            },
+            "http_request": {
+                "description": "Make an HTTP request to fetch data from the web or APIs",
+                "params": {"url": "full URL", "method": "(optional) GET/POST/PUT/DELETE, default GET", "headers": "(optional) dict of headers", "body": "(optional) request body string or dict"},
+            },
+            "set_knowledge": {
+                "description": "Store a fact in the knowledge store",
+                "params": {"key": "dot.separated.key", "value": "value string", "source": "(optional) source label"},
+            },
+            "get_knowledge": {
+                "description": "Retrieve a fact from the knowledge store",
+                "params": {"key": "exact key", "prefix": "(optional) scan by prefix"},
+            },
+        }
+
+        for action_type in self._handlers:
+            # Skip tool_call from the flat list — it gets its own section with backend details
+            if action_type == "tool_call":
+                continue
+            doc = builtin_docs.get(action_type, {"description": action_type, "params": {}})
+            actions.append({"action_type": action_type, **doc})
+
+        # Tool backends (tool_call dispatch)
+        tools = self.tool_registry.list_tools()
+        if tools:
+            tool_names = [t.name for t in tools]
+            actions.append({
+                "action_type": "tool_call",
+                "description": f"Call a registered tool backend. Available tools: {', '.join(tool_names)}",
+                "params": {"tool": "tool name", "method": "method name", "params": "dict of method parameters"},
+            })
+
+        # Always-available bus actions (handled in llm_agent, not executor)
+        actions.extend([
+            {
+                "action_type": "emit_event",
+                "description": "Publish a new event to the bus (chain reaction)",
+                "params": {"topic": "event topic", "payload": "event payload dict"},
+            },
+            {
+                "action_type": "log",
+                "description": "Log a message (informational, no side effects)",
+                "params": {"message": "log message"},
+            },
+            {
+                "action_type": "alert",
+                "description": "Broadcast an alert to the dashboard",
+                "params": {"message": "alert message"},
+            },
+        ])
+
+        return actions
+
     def _register_builtins(self) -> None:
         self.register("shell_exec", self._handle_shell_exec)
         self.register("file_read", self._handle_file_read)
@@ -47,6 +140,8 @@ class Executor:
         self.register("file_delete", self._handle_file_delete)
         self.register("notify", self._handle_notify)
         self.register("open_app", self._handle_open_app)
+        self.register("http_request", self._handle_http_request)
+        self.register("tool_call", self._handle_tool_call)
 
     async def _handle_shell_exec(self, data: dict) -> dict:
         command = data.get("command", "")
@@ -133,3 +228,53 @@ class Executor:
             return {"error": "xdg-open not found"}
         except Exception as e:
             return {"error": str(e)}
+
+    async def _handle_http_request(self, data: dict) -> dict:
+        """Make an HTTP request to fetch external data."""
+        url = data.get("url", "")
+        method = data.get("method", "GET").upper()
+        headers = data.get("headers") or {}
+        body = data.get("body")
+
+        if not url:
+            return {"error": "url is required"}
+
+        try:
+            async with httpx.AsyncClient(timeout=self._http_timeout, follow_redirects=True) as client:
+                kwargs: dict[str, Any] = {"headers": headers}
+                if body and method in ("POST", "PUT", "PATCH"):
+                    if isinstance(body, dict):
+                        kwargs["json"] = body
+                    else:
+                        kwargs["content"] = str(body)
+
+                resp = await client.request(method, url, **kwargs)
+
+                # Truncate large responses
+                content = resp.text[:self._http_max_size]
+                return {
+                    "status_code": resp.status_code,
+                    "headers": dict(resp.headers),
+                    "body": content,
+                    "url": str(resp.url),
+                    "truncated": len(resp.text) > self._http_max_size,
+                }
+        except httpx.TimeoutException:
+            return {"error": f"HTTP request timed out after {self._http_timeout}s"}
+        except httpx.RequestError as e:
+            return {"error": f"HTTP request failed: {e}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _handle_tool_call(self, data: dict) -> dict:
+        """Dispatch to a registered tool backend."""
+        tool = data.get("tool", "")
+        method = data.get("method", "")
+        params = data.get("params") or {}
+
+        if not tool:
+            return {"error": "tool is required"}
+        if not method:
+            return {"error": "method is required"}
+
+        return await self.tool_registry.call(tool, method, params)

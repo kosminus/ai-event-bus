@@ -64,6 +64,16 @@ class ProducersConfig:
 
 
 @dataclass
+class ToolsConfig:
+    http_request_enabled: bool = True
+    http_request_timeout: int = 30
+    http_request_max_size: int = 1_048_576  # 1MB response cap
+    playwright_enabled: bool = False
+    playwright_headless: bool = True
+    playwright_timeout: int = 30_000  # ms per action
+
+
+@dataclass
 class PolicyConfig:
     trust_overrides: dict = field(default_factory=dict)
     shell_timeout_seconds: int = 30
@@ -92,6 +102,7 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     producers: ProducersConfig = field(default_factory=ProducersConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     lanes: LaneConfig = field(default_factory=LaneConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     seed_defaults: bool = True
@@ -131,6 +142,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         logging=LoggingConfig(**raw.get("logging", {})),
         producers=ProducersConfig(**raw.get("producers", {})),
         policy=PolicyConfig(**raw.get("policy", {})),
+        tools=ToolsConfig(**raw.get("tools", {})),
         lanes=LaneConfig(**raw.get("lanes", {})),
         classifier=ClassifierConfig(**raw.get("classifier", {})),
         seed_defaults=raw.get("seed_defaults", True),

@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from aiventbus.models import Agent, Event, EventAssignment, KnowledgeEntry
 from aiventbus.storage.repositories import EventRepository, KnowledgeRepository, MemoryRepository
+
+if TYPE_CHECKING:
+    from aiventbus.core.executor import Executor
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +26,13 @@ DEFAULT_TOKEN_BUDGET = 4096
 class ContextEngine:
     """Builds prompts for LLM agents with relevant context."""
 
-    def __init__(self, event_repo: EventRepository, memory_repo: MemoryRepository, knowledge_repo: KnowledgeRepository | None = None):
+    def __init__(self, event_repo: EventRepository, memory_repo: MemoryRepository,
+                 knowledge_repo: KnowledgeRepository | None = None,
+                 executor: Executor | None = None):
         self.event_repo = event_repo
         self.memory_repo = memory_repo
         self.knowledge_repo = knowledge_repo
+        self.executor = executor
 
     async def build_prompt(
         self,
@@ -99,8 +105,16 @@ class ContextEngine:
         return messages
 
     def _build_system_prompt(self, agent: Agent) -> str:
-        """Build the agent's system prompt with bus context."""
+        """Build the agent's system prompt with bus context.
+
+        The available action types are generated dynamically from the executor
+        so new tools (Playwright, MCP, http_request, etc.) appear automatically.
+        """
         parts = [agent.system_prompt]
+
+        # Build action type docs dynamically
+        action_docs = self._build_action_docs()
+
         parts.append(
             "\n\nYou are an AI agent connected to the AI Event Bus. "
             "You receive events and must respond with structured JSON output.\n\n"
@@ -112,26 +126,77 @@ class ContextEngine:
             '  "confidence": 0.0 to 1.0,\n'
             '  "proposed_actions": [\n'
             '    {\n'
-            '      "action_type": "emit_event" | "log" | "alert" | "notify" | "shell_exec" | "file_read" | "file_write" | "file_delete" | "open_app" | "set_knowledge" | "get_knowledge",\n'
-            '      "topic": "optional.topic.for.emit_event",\n'
-            '      "payload": {},\n'
-            '      "message": "optional message for log/alert/notify",\n'
-            '      "title": "optional title for notify (desktop notification)",\n'
-            '      "command": "shell command for shell_exec",\n'
-            '      "path": "file path for file_read/file_write/file_delete",\n'
-            '      "content": "file content for file_write",\n'
-            '      "target": "URL or path for open_app",\n'
-            '      "key": "dot.separated.key for set_knowledge/get_knowledge",\n'
-            '      "value": "value string for set_knowledge"\n'
+            '      "action_type": "<one of the types listed below>",\n'
+            '      "...": "action-specific parameters (see below)"\n'
             '    }\n'
             '  ]\n'
             '}\n'
-            "```\n"
+            "```\n\n"
+            "## Available action types\n\n"
+            "You may ONLY use the following action types. Do NOT invent new ones.\n\n"
+            f"{action_docs}\n"
             "Respond ONLY with the JSON object, no additional text."
         )
+
+        # Tool backend details
+        tool_docs = self._build_tool_docs()
+        if tool_docs:
+            parts.append(f"\n## External tools\n\n{tool_docs}")
+
         if agent.capabilities:
             parts.append(f"\nYour capabilities: {', '.join(agent.capabilities)}")
         return "\n".join(parts)
+
+    def _build_action_docs(self) -> str:
+        """Generate action type documentation from the executor."""
+        if not self.executor:
+            # Fallback: minimal hardcoded list (shouldn't happen in practice)
+            return (
+                '- **emit_event**: Publish a new event. Params: topic, payload\n'
+                '- **log**: Log a message. Params: message\n'
+                '- **alert**: Broadcast an alert. Params: message\n'
+                '- **notify**: Desktop notification. Params: title, message\n'
+                '- **shell_exec**: Run a shell command. Params: command, cwd, timeout\n'
+                '- **http_request**: HTTP request. Params: url, method, headers, body\n'
+                '- **file_read**: Read a file. Params: path\n'
+                '- **file_write**: Write a file. Params: path, content\n'
+                '- **file_delete**: Delete a file. Params: path\n'
+                '- **open_app**: Open URL/file. Params: target\n'
+                '- **set_knowledge**: Store a fact. Params: key, value\n'
+                '- **get_knowledge**: Retrieve a fact. Params: key or prefix\n'
+            )
+
+        lines = []
+        for action in self.executor.list_available_actions():
+            at = action["action_type"]
+            desc = action.get("description", "")
+            params = action.get("params", {})
+            param_str = ", ".join(f"{k}: {v}" for k, v in params.items()) if params else ""
+            line = f"- **{at}**: {desc}"
+            if param_str:
+                line += f". Params: {{{param_str}}}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _build_tool_docs(self) -> str:
+        """Generate documentation for registered tool backends."""
+        if not self.executor:
+            return ""
+
+        tools = self.executor.tool_registry.list_tools()
+        if not tools:
+            return ""
+
+        lines = ["Use action_type `tool_call` to invoke these tools:\n"]
+        for tool in tools:
+            lines.append(f"### {tool.name}")
+            lines.append(f"{tool.description}\n")
+            for method in tool.methods:
+                params = method.parameters
+                param_str = ", ".join(f"{k}" for k in params) if params else "none"
+                lines.append(f"- **{method.name}**({param_str}): {method.description}")
+            lines.append("")
+        return "\n".join(lines)
 
     def _format_event_prompt(self, event: Event) -> str:
         """Format an event as a structured prompt for the LLM."""

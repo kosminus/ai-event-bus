@@ -342,6 +342,27 @@ class LLMAgentConsumer(BaseConsumer):
             logger.warning("Agent %s proposed %s but policy/executor not configured", self.agent.id, action_type)
             return
 
+        # Check if executor can handle this action type
+        if not self.executor.has_handler(action_type):
+            logger.warning(
+                "Agent %s proposed unknown action type '%s' for event %s",
+                self.agent.id, action_type, source_event.id,
+            )
+            await self.bus._emit_system_event("system.unknown_action", {
+                "agent_id": self.agent.id,
+                "event_id": source_event.id,
+                "action_type": action_type,
+                "action_data": action,
+                "message": f"No handler for action type: {action_type}",
+            })
+            await self.ws_hub.broadcast("system", "action.unknown", {
+                "agent_id": self.agent.id,
+                "event_id": source_event.id,
+                "action_type": action_type,
+                "message": f"Agent proposed unsupported action type '{action_type}'",
+            })
+            return
+
         decision = self.policy_engine.evaluate(action_type, action)
 
         if decision.trust_mode == TrustMode.deny:
