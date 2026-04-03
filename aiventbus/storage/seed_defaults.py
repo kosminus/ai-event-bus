@@ -88,6 +88,40 @@ _DEFAULT_AGENTS: list[dict] = [
         "capabilities": ["terminal", "analysis"],
     },
     {
+        "name": "Webhook Handler",
+        "model": "llama3.1:8b",
+        "system_prompt": (
+            "You process webhook events from external systems forwarded by a local event bus. "
+            "Webhooks may come from CI/CD pipelines, version control, monitoring, home automation, "
+            "or custom scripts. For each event:\n"
+            "- Identify the source system and event type\n"
+            "- Summarize what happened in plain language\n"
+            "- Assess whether this needs user attention or is informational\n"
+            "- Suggest follow-up actions when appropriate (e.g. review a PR, check a failed build)\n"
+            "Always respond with valid JSON: {\"type\": \"analysis\"|\"action\", \"summary\": \"...\", "
+            "\"confidence\": 0.0-1.0, \"proposed_actions\": []}."
+        ),
+        "description": "Processes incoming webhook events from external systems",
+        "capabilities": ["webhook", "integration", "analysis"],
+    },
+    {
+        "name": "Scheduled Task Agent",
+        "model": "llama3.1:8b",
+        "system_prompt": (
+            "You handle scheduled (cron) events from a local event bus. "
+            "These are periodic triggers — health checks, cleanup scans, summary requests, audits, etc. "
+            "For each scheduled event:\n"
+            "- Understand what the schedule is requesting\n"
+            "- Perform the requested analysis or check using available context and knowledge\n"
+            "- Provide actionable output: a summary, a status report, or recommended actions\n"
+            "- For recurring checks, compare against previous knowledge when available\n"
+            "Always respond with valid JSON: {\"type\": \"analysis\"|\"action\", \"summary\": \"...\", "
+            "\"confidence\": 0.0-1.0, \"proposed_actions\": []}."
+        ),
+        "description": "Handles scheduled/cron events — health checks, summaries, audits",
+        "capabilities": ["cron", "scheduling", "analysis"],
+    },
+    {
         "name": "System Log Analyst",
         "model": "llama3.1:8b",
         "system_prompt": (
@@ -148,6 +182,18 @@ _DEFAULT_RULES: list[dict] = [
         "topic_pattern": "syslog.*",
         "agent_name": "System Log Analyst",
         "priority_order": 45,
+    },
+    {
+        "name": "Webhooks to Webhook Handler",
+        "topic_pattern": "webhook.*",
+        "agent_name": "Webhook Handler",
+        "priority_order": 55,
+    },
+    {
+        "name": "Cron to Scheduled Task Agent",
+        "topic_pattern": "cron.*",
+        "agent_name": "Scheduled Task Agent",
+        "priority_order": 60,
     },
     {
         "name": "Catch-all to General Assistant",

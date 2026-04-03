@@ -12,6 +12,8 @@ from aiventbus.producers.file_watcher import FileWatcherProducer
 from aiventbus.producers.dbus_listener import DBusListenerProducer
 from aiventbus.producers.terminal_monitor import TerminalMonitorProducer
 from aiventbus.producers.journald import JournaldProducer
+from aiventbus.producers.webhook import WebhookProducer
+from aiventbus.producers.cron import CronProducer
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,14 @@ PRODUCER_REGISTRY: dict[str, dict[str, str]] = {
     "journald": {
         "description": "Streams systemd journal entries (errors, auth, service state)",
         "type": "journald",
+    },
+    "webhook": {
+        "description": "Receives HTTP POST webhooks and publishes them as events",
+        "type": "webhook",
+    },
+    "cron": {
+        "description": "Publishes events on a cron schedule or at fixed intervals",
+        "type": "cron",
     },
 }
 
@@ -78,6 +88,18 @@ class ProducerManager:
                 priority_filter=cfg.journald_priority_filter,
                 units=cfg.journald_units,
             )
+        elif name == "webhook":
+            return WebhookProducer(
+                bus=self.bus,
+                secret=cfg.webhook_secret,
+                default_priority=cfg.webhook_default_priority,
+            )
+        elif name == "cron":
+            return CronProducer(
+                bus=self.bus,
+                jobs=cfg.cron_jobs,
+                timezone=cfg.cron_timezone,
+            )
         return None
 
     async def start_all(self) -> None:
@@ -98,6 +120,12 @@ class ProducerManager:
 
         if producers_cfg.journald_enabled:
             await self.enable("journald")
+
+        if producers_cfg.webhook_enabled:
+            await self.enable("webhook")
+
+        if producers_cfg.cron_enabled:
+            await self.enable("cron")
 
         logger.info("Started %d producers", len(self._producers))
 

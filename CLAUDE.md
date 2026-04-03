@@ -74,7 +74,9 @@ aiventbus/
 │   ├── file_watcher.py      # File system watcher (watchfiles/inotify)
 │   ├── dbus_listener.py     # DBus session bus listener (notifications, session lock)
 │   ├── terminal_monitor.py  # Shell history monitor (bash/zsh)
-│   └── journald.py          # Systemd journal stream (errors, auth, services)
+│   ├── journald.py          # Systemd journal stream (errors, auth, services)
+│   ├── webhook.py           # HTTP webhook receiver (POST → bus events)
+│   └── cron.py              # Scheduled event emitter (cron/interval → bus events)
 ├── storage/
 │   ├── db.py                # SQLite schema (10 tables), connection, migrations
 │   ├── repositories.py      # CRUD for all entities
@@ -85,6 +87,8 @@ aiventbus/
 │   ├── agents.py            # CRUD agents + enable/disable
 │   ├── routing_rules.py     # CRUD routing rules
 │   ├── producers.py         # Producers list, enable/disable API
+│   ├── webhook.py           # Webhook receiver endpoint (POST /api/v1/webhook/{path})
+│   ├── cron.py              # Cron job management API (CRUD scheduled jobs)
 │   ├── actions.py           # Confirmation queue (pending/approve/deny)
 │   ├── knowledge.py         # Knowledge store CRUD
 │   ├── ws.py                # WebSocket hub (multiplexed channels)
@@ -136,13 +140,17 @@ Key endpoints:
 - `GET /api/v1/producers` — list all producers with running status
 - `POST /api/v1/producers/:name/enable` — start a producer
 - `POST /api/v1/producers/:name/disable` — stop a producer
+- `POST /api/v1/webhook/{topic_path}` — receive a webhook event
+- `GET /api/v1/cron/jobs` — list scheduled cron jobs
+- `POST /api/v1/cron/jobs` — add a cron job at runtime
+- `DELETE /api/v1/cron/jobs/:name` — remove a cron job
 - `GET /api/v1/system/status` — health check
 - `GET /api/v1/topics` — topic stats
 - `ws://localhost:8420/ws` — WebSocket (channels: `events:*`, `agents:*`, `system`)
 
 ## Producers
 
-Five built-in producers capture OS-level events. All are manageable from the web UI Producers tab or via config.
+Seven built-in producers capture events from OS activity, external systems, and time-based triggers. All are manageable from the web UI Producers tab or via config.
 
 | Producer | Topics | How it works | Default |
 |---|---|---|---|
@@ -151,6 +159,8 @@ Five built-in producers capture OS-level events. All are manageable from the web
 | **DBus Listener** | `notification.received`, `session.locked`, `session.unlocked` | Subscribes to freedesktop DBus signals. Requires `dbus-fast` package | Disabled |
 | **Terminal Monitor** | `terminal.command` | Polls shell history file for new commands (supports bash and zsh extended format) | Disabled |
 | **Journald** | `syslog.error`, `syslog.warning`, `syslog.auth`, `syslog.service`, `syslog.info` | Streams `journalctl -f -o json`. Classifies by priority & facility. Filters noise by default | Disabled |
+| **Webhook** | `webhook.{path}` | Receives HTTP POST requests at `/api/v1/webhook/{path}` and publishes them as events. Supports Bearer token and GitHub HMAC auth | Disabled |
+| **Cron** | configurable per job | Publishes events on a cron schedule or at fixed intervals using APScheduler. Jobs configurable in config.yaml or via API at runtime | Disabled |
 
 Enable in `config.yaml`:
 ```yaml
@@ -163,6 +173,20 @@ producers:
   journald_enabled: true
   journald_priority_filter: 4        # 4=warning+ (default), 3=error+, 7=all; auth/service always pass through
   journald_units: ["sshd", "docker"] # limit to specific units (empty = all)
+  webhook_enabled: true
+  webhook_secret: "my-secret-token"  # optional: Bearer token / HMAC secret
+  cron_enabled: true
+  cron_timezone: "UTC"
+  cron_jobs:
+    - name: health_check
+      expression: "*/5 * * * *"      # every 5 minutes
+      topic: cron.health.check
+    - name: daily_summary
+      expression: "0 9 * * *"        # every day at 9am
+      topic: cron.daily.summary
+    - name: cleanup_scan
+      expression: "1h"               # shorthand: every hour
+      topic: cron.downloads.cleanup
 ```
 
 Or toggle at runtime from the **Producers** tab in the web dashboard.
@@ -182,7 +206,7 @@ Set `AIVENTBUS_URL` to override the default `http://localhost:8420`.
 
 ## Default agents and routing rules
 
-On first run (empty database), the bus seeds 6 agents and 7 routing rules so it works out of the box:
+On first run (empty database), the bus seeds 8 agents and 9 routing rules so it works out of the box:
 
 | Agent | Handles | Topic pattern |
 |---|---|---|
@@ -192,6 +216,8 @@ On first run (empty database), the bus seeds 6 agents and 7 routing rules so it 
 | Notification Summarizer | Desktop notifications | `notification.*` |
 | Terminal Helper | Shell commands | `terminal.*` |
 | System Log Analyst | Journal/syslog entries | `syslog.*` |
+| Webhook Handler | External webhook events | `webhook.*` |
+| Scheduled Task Agent | Cron/scheduled events | `cron.*` |
 
 All agents use the configured Ollama model (`llama3.1:8b` by default) and return structured JSON responses.
 
@@ -212,10 +238,10 @@ Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only ru
 - Full web dashboard with real-time WebSocket
 - Desktop widget (Tauri — chat, activity feed, approvals, tray icon, Ctrl+Space)
 - CLI (`aibus` — query, status, events, approve, deny, knowledge, trace, shell-hook)
-- Producers: clipboard monitor, file watcher, DBus listener, terminal monitor, journald
+- Producers: clipboard monitor, file watcher, DBus listener, terminal monitor, journald, webhook, cron
 - Shell preexec hook for real-time terminal command capture (bash + zsh)
 - Producers API and web UI tab (list, enable/disable at runtime)
-- Default agents and routing rules seeder (6 agents, 7 routes on first run)
+- Default agents and routing rules seeder (8 agents, 9 routes on first run)
 - SQLite persistence (10 tables) with migrations
 - Lifecycle manager (expiry, retry)
 

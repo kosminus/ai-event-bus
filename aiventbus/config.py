@@ -55,6 +55,12 @@ class ProducersConfig:
     journald_filter_noise: bool = True
     journald_priority_filter: int = 4  # 4=warning+, 3=error+, 7=all (auth always passes)
     journald_units: list = field(default_factory=list)  # e.g. ["sshd", "docker"]
+    webhook_enabled: bool = False
+    webhook_secret: str | None = None  # Bearer token / HMAC secret (None = no auth)
+    webhook_default_priority: str = "medium"
+    cron_enabled: bool = False
+    cron_timezone: str = "UTC"
+    cron_jobs: list = field(default_factory=list)  # [{"name": "...", "expression": "*/5 * * * *", "topic": "..."}]
 
 
 @dataclass

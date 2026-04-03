@@ -266,7 +266,7 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize API modules
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers, webhook, cron
 
     events.init(_bus, event_repo, assignment_repo, response_repo)
     agents.init(agent_repo, memory_repo)
@@ -279,6 +279,8 @@ async def lifespan(app: FastAPI):
     # Initialize and start producers
     _producer_manager = ProducerManager(bus=_bus, config=_config)
     producers.init(_producer_manager)
+    webhook.init(_producer_manager)
+    cron.init(_producer_manager)
     await _producer_manager.start_all()
 
     # Start all existing agent consumers
@@ -323,7 +325,7 @@ def create_app() -> FastAPI:
     )
 
     # API routes
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers, webhook, cron
 
     app.include_router(events.router)
     app.include_router(agents.router)
@@ -333,6 +335,8 @@ def create_app() -> FastAPI:
     app.include_router(actions.router)
     app.include_router(knowledge.router)
     app.include_router(producers.router)
+    app.include_router(webhook.router)
+    app.include_router(cron.router)
 
     # Static files (Web UI)
     static_dir = Path(__file__).parent / "static"
