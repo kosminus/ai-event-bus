@@ -133,6 +133,8 @@ Key endpoints:
 - `POST /api/v1/agents` — create agent (auto-starts consumer)
 - `POST /api/v1/routing-rules` — create routing rule
 - `GET /api/v1/actions/pending` — list actions awaiting approval
+- `GET /api/v1/actions/history` — all actions (pending + resolved)
+- `GET /api/v1/actions/:id` — action detail
 - `POST /api/v1/actions/:id/approve` — approve and execute action
 - `POST /api/v1/actions/:id/deny` — deny action
 - `GET /api/v1/knowledge` — list knowledge (prefix filter)
@@ -219,7 +221,7 @@ On first run (empty database), the bus seeds 8 agents and 9 routing rules so it 
 | Webhook Handler | External webhook events | `webhook.*` |
 | Scheduled Task Agent | Cron/scheduled events | `cron.*` |
 
-All agents use the configured Ollama model (`llama3.1:8b` by default) and return structured JSON responses.
+All agents use the configured Ollama model (`gemma4:latest` by default) and return structured JSON responses.
 
 Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only runs when the agents table is empty — existing databases are never touched.
 
@@ -231,11 +233,11 @@ Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only ru
 - LLM agent consumers via Ollama (streaming)
 - Policy engine (blocklist, allowlist, trust modes: auto/confirm/deny)
 - Executor (shell_exec, file_read, file_write, file_delete, notify, open_app)
-- Confirmation queue with approve/deny API
+- Confirmation queue with approve/deny API and web UI (Approvals tab with history)
 - Context engine (memory, pinned facts, knowledge store, ref resolution)
 - Knowledge store with system facts auto-seeder
 - Output parser (structured JSON extraction)
-- Full web dashboard with real-time WebSocket
+- Full web dashboard with real-time WebSocket (events, agents, approvals, producers, config)
 - Desktop widget (Tauri — chat, activity feed, approvals, tray icon, Ctrl+Space)
 - CLI (`aibus` — query, status, events, approve, deny, knowledge, trace, shell-hook)
 - Producers: clipboard monitor, file watcher, DBus listener, terminal monitor, journald, webhook, cron

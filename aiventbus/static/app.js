@@ -16,6 +16,8 @@ const state = {
     selectedEvent: null,
     ws: null,
     producers: [],
+    pendingActions: [],
+    actionHistory: [],
     agentStreams: {},  // agent_id -> current streaming text
 };
 
@@ -80,6 +82,22 @@ function handleWSMessage(msg) {
     } else if (type === 'agent.response') {
         state.agentStreams[data.agent_id] = '';
         refreshData();
+    } else if (type === 'action.pending') {
+        state.pendingActions.unshift(data);
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+        render();
+        showToast(`Action pending: ${data.action_type}`, 'info');
+    } else if (type === 'action.executed') {
+        refreshApprovals();
+        showToast(`Auto-executed: ${data.action_type}`, 'success');
+    } else if (type === 'action.approved') {
+        state.pendingActions = state.pendingActions.filter(a => a.action_id !== data.action_id);
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+        render();
+    } else if (type === 'action.denied') {
+        state.pendingActions = state.pendingActions.filter(a => a.action_id !== data.action_id);
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+        render();
     } else if (type === 'system.alert') {
         showToast(data.message, 'error');
     }
@@ -124,12 +142,19 @@ async function refreshData() {
     } catch (e) {
         console.error('Refresh failed:', e);
     }
-    // Fetch producers separately so a failure doesn't block the rest
+    // Fetch producers and pending actions separately so a failure doesn't block the rest
     try {
         state.producers = await api('/producers');
         if (state.currentView === 'producers') renderProducers();
     } catch (e) {
         console.debug('Producers fetch failed:', e);
+    }
+    try {
+        state.pendingActions = await api('/actions/pending');
+        state.actionHistory = await api('/actions/history');
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+    } catch (e) {
+        console.debug('Pending actions fetch failed:', e);
     }
 }
 
@@ -160,6 +185,7 @@ function renderMain() {
         case 'dashboard': renderDashboard(main); break;
         case 'events': renderEventsView(main); break;
         case 'agents': renderAgentsView(main); break;
+        case 'approvals': renderApprovalsView(main); break;
         case 'producers': renderProducersView(main); break;
         case 'config': renderConfigView(main); break;
         case 'event-detail': renderEventDetail(main); break;
@@ -215,6 +241,10 @@ function updateStats() {
         <div class="stat-card">
             <div class="stat-value">${s.active_assignments || 0}</div>
             <div class="stat-label">Queue Depth</div>
+        </div>
+        <div class="stat-card" style="cursor:pointer" onclick="navigate('approvals')">
+            <div class="stat-value" style="${state.pendingActions.length > 0 ? 'color:var(--accent-orange)' : ''}">${state.pendingActions.length}</div>
+            <div class="stat-label">Pending Approvals</div>
         </div>
     `;
 }
@@ -475,7 +505,7 @@ function showCreateAgent() {
         </div>
         <div class="form-group">
             <label>Model</label>
-            <input id="agent-model" placeholder="gemma3:4b" />
+            <input id="agent-model" placeholder="gemma4:latest" />
         </div>
         <div class="form-group">
             <label>System Prompt</label>
@@ -569,6 +599,197 @@ async function testAgent(agentId) {
         }),
     });
     showToast(`Test event sent to ${agent.name}`, 'success');
+}
+
+// --- Approvals ---
+function renderApprovalsView(el) {
+    const pending = state.pendingActions;
+    const resolved = (state.actionHistory || []).filter(a => a.status !== 'waiting_confirmation');
+    el.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h2 style="font-size:16px">Pending Approvals</h2>
+            <span style="color:var(--text-muted);font-size:12px">${pending.length} action${pending.length !== 1 ? 's' : ''} awaiting review</span>
+        </div>
+        <div id="approvals-list">
+            ${pending.length === 0
+                ? '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted)">No pending actions. Agents will queue actions here when they need approval.</div>'
+                : pending.map(a => renderActionCard(a)).join('')}
+        </div>
+        ${resolved.length > 0 ? `
+        <div style="margin-top:24px;margin-bottom:12px">
+            <h2 style="font-size:16px;color:var(--text-secondary)">History</h2>
+        </div>
+        <div id="approvals-history">
+            ${resolved.map(a => renderHistoryCard(a)).join('')}
+        </div>` : ''}
+    `;
+}
+
+function renderActionCard(action) {
+    const actionData = action.action_data || action;
+    const actionType = action.action_type || actionData.action_type || 'unknown';
+    const agentId = action.agent_id || '';
+    const eventId = action.event_id || '';
+    const actionId = action.id || action.action_id || '';
+    const reason = action.policy_reason || '';
+    const created = action.created_at ? new Date(action.created_at).toLocaleString() : '';
+
+    // Build a readable description of what the action wants to do
+    let detail = '';
+    if (actionType === 'shell_exec') {
+        detail = `<div class="action-command"><span style="color:var(--accent-orange)">$</span> ${escapeHtml(actionData.command || '')}</div>`;
+    } else if (actionType === 'file_read') {
+        detail = `<div style="font-size:12px;color:var(--text-secondary)">Read: <code>${escapeHtml(actionData.path || '')}</code></div>`;
+    } else if (actionType === 'file_write') {
+        detail = `<div style="font-size:12px;color:var(--text-secondary)">Write to: <code>${escapeHtml(actionData.path || '')}</code></div>`;
+    } else if (actionType === 'file_delete') {
+        detail = `<div style="font-size:12px;color:var(--accent-red)">Delete: <code>${escapeHtml(actionData.path || '')}</code></div>`;
+    } else if (actionType === 'notify') {
+        detail = `<div style="font-size:12px;color:var(--text-secondary)">${escapeHtml(actionData.message || '')}</div>`;
+    } else if (actionType === 'open_app') {
+        detail = `<div style="font-size:12px;color:var(--text-secondary)">Open: ${escapeHtml(actionData.app || actionData.command || '')}</div>`;
+    } else {
+        detail = `<div class="json-block" style="max-height:150px">${JSON.stringify(actionData, null, 2)}</div>`;
+    }
+
+    return `
+    <div class="action-card">
+        <div class="action-card-header">
+            <div>
+                <span class="action-type-badge ${actionType}">${actionType}</span>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">${actionId}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted)">${created}</div>
+        </div>
+        ${detail}
+        <div class="action-meta">
+            <span>Agent: <span style="color:var(--accent-purple)">${escapeHtml(agentId)}</span></span>
+            <span>Event: <span style="color:var(--accent-blue);cursor:pointer" onclick="showEventDetail('${eventId}')">${escapeHtml(eventId)}</span></span>
+            ${reason ? `<span>Reason: <span style="color:var(--text-secondary)">${escapeHtml(reason)}</span></span>` : ''}
+        </div>
+        <div class="action-buttons">
+            <button class="btn btn-primary" onclick="approveAction('${actionId}')">Approve</button>
+            <button class="btn btn-danger" onclick="denyAction('${actionId}')">Deny</button>
+        </div>
+    </div>`;
+}
+
+function renderHistoryCard(action) {
+    const actionType = action.action_type || 'unknown';
+    const actionId = action.id || '';
+    const status = action.status || '';
+    const resolved = action.resolved_at ? new Date(action.resolved_at).toLocaleString() : '';
+    const result = action.result;
+
+    let statusColor = 'var(--text-muted)';
+    let statusLabel = status;
+    if (status === 'completed') { statusColor = 'var(--accent-green)'; statusLabel = 'approved'; }
+    else if (status === 'denied') { statusColor = 'var(--accent-red)'; }
+    else if (status === 'approved') { statusColor = 'var(--accent-green)'; }
+
+    // Brief summary of what happened
+    let summary = '';
+    if (actionType === 'shell_exec') {
+        const cmd = (action.action_data || {}).command || '';
+        summary = `<span style="font-family:var(--font-mono);font-size:12px;color:var(--text-secondary)">$ ${escapeHtml(cmd)}</span>`;
+        if (result && result.returncode !== undefined) {
+            summary += ` <span style="font-size:11px;color:${result.returncode === 0 ? 'var(--accent-green)' : 'var(--accent-red)'}">exit ${result.returncode}</span>`;
+        }
+    } else {
+        summary = `<span style="font-size:12px;color:var(--text-secondary)">${escapeHtml(JSON.stringify(action.action_data || {}).slice(0, 80))}</span>`;
+    }
+
+    const hasResult = result && Object.keys(result).length > 0;
+
+    return `
+    <div class="action-card" style="opacity:0.8">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;align-items:center;gap:8px">
+                <span class="action-type-badge ${actionType}">${actionType}</span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:500;text-transform:uppercase;color:${statusColor}">${statusLabel}</span>
+                ${summary}
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--text-muted)">${resolved}</span>
+                ${hasResult ? `<button class="btn btn-sm" onclick="viewActionResult('${actionId}')">View Result</button>` : ''}
+            </div>
+        </div>
+    </div>`;
+}
+
+async function viewActionResult(actionId) {
+    try {
+        const action = await api(`/actions/${actionId}`);
+        showActionResult(actionId, { result: action.result || {} });
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+async function approveAction(actionId) {
+    try {
+        const result = await api(`/actions/${actionId}/approve`, { method: 'POST' });
+        state.pendingActions = state.pendingActions.filter(a => (a.id || a.action_id) !== actionId);
+        showToast('Action approved', 'success');
+        // Show the execution result in a modal
+        showActionResult(actionId, result);
+        refreshApprovals();
+        render();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+async function denyAction(actionId) {
+    try {
+        await api(`/actions/${actionId}/deny`, { method: 'POST' });
+        state.pendingActions = state.pendingActions.filter(a => (a.id || a.action_id) !== actionId);
+        showToast('Action denied', 'success');
+        refreshApprovals();
+        render();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function showActionResult(actionId, result) {
+    const r = result.result || {};
+    let body = '';
+    if (r.stdout !== undefined) {
+        // shell_exec result
+        body = `
+            ${r.returncode !== undefined ? `<div style="margin-bottom:8px;font-size:12px">Exit code: <span style="color:${r.returncode === 0 ? 'var(--accent-green)' : 'var(--accent-red)'}">${r.returncode}</span></div>` : ''}
+            ${r.stdout ? `<div style="margin-bottom:4px;font-size:11px;color:var(--text-muted)">STDOUT</div><div class="json-block" style="max-height:400px;white-space:pre">${escapeHtml(r.stdout)}</div>` : ''}
+            ${r.stderr ? `<div style="margin-top:8px;margin-bottom:4px;font-size:11px;color:var(--accent-red)">STDERR</div><div class="json-block" style="max-height:200px;white-space:pre;border-color:var(--accent-red)">${escapeHtml(r.stderr)}</div>` : ''}
+        `;
+    } else if (r.error) {
+        body = `<div style="color:var(--accent-red)">${escapeHtml(r.error)}</div>`;
+    } else {
+        body = `<div class="json-block">${JSON.stringify(r, null, 2)}</div>`;
+    }
+
+    const overlay = document.getElementById('modal-overlay');
+    overlay.innerHTML = `
+        <div class="modal" style="max-width:700px">
+            <h2>Execution Result</h2>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">${actionId}</div>
+            ${body}
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="closeModal()">Close</button>
+            </div>
+        </div>
+    `;
+    overlay.classList.add('active');
+}
+
+async function refreshApprovals() {
+    try {
+        state.pendingActions = await api('/actions/pending');
+        state.actionHistory = await api('/actions/history');
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+    } catch (e) {
+        console.debug('Approvals refresh failed:', e);
+    }
 }
 
 // --- Producers ---

@@ -99,7 +99,7 @@ curl -X POST http://localhost:8420/api/v1/agents \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "general assistant",
-    "model": "gemma3:latest",
+    "model": "gemma4:latest",
     "description": "General-purpose AI assistant",
     "system_prompt": "You are a helpful AI assistant. Answer concisely."
   }'
@@ -143,7 +143,7 @@ If no routing rule matches, an optional LLM classifier routes the event to the b
 ```yaml
 classifier:
   enabled: true
-  model: "gemma3:latest"
+  model: "gemma4:latest"
 ```
 
 ## Linux integration
@@ -261,7 +261,7 @@ server:
 
 ollama:
   base_url: "http://localhost:11434"
-  default_model: "llama3.1:8b"
+  default_model: "gemma4:latest"
 
 bus:
   dedupe_window_seconds: 60
@@ -278,7 +278,7 @@ producers:
 
 classifier:
   enabled: false
-  model: "gemma3:latest"
+  model: "gemma4:latest"
 
 policy:
   trust_overrides: {}
@@ -308,7 +308,9 @@ lanes:
 | `POST` | `/api/v1/routing-rules` | Create routing rule |
 | `GET` | `/api/v1/routing-rules` | List rules |
 | `GET` | `/api/v1/actions/pending` | List pending actions |
-| `POST` | `/api/v1/actions/:id/approve` | Approve action |
+| `GET` | `/api/v1/actions/history` | All actions (pending + resolved) |
+| `GET` | `/api/v1/actions/:id` | Action detail |
+| `POST` | `/api/v1/actions/:id/approve` | Approve and execute action |
 | `POST` | `/api/v1/actions/:id/deny` | Deny action |
 | `GET` | `/api/v1/knowledge` | List knowledge (with prefix filter) |
 | `PUT` | `/api/v1/knowledge/:key` | Set knowledge entry |

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AGENTS: list[dict] = [
     {
         "name": "General Assistant",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You are a general-purpose AI assistant embedded in a local event bus. "
             "You receive events from the user and from system producers. "
@@ -34,7 +34,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "Clipboard Analyzer",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You analyze clipboard contents forwarded by a local event bus. "
             "Determine what the user copied — code snippet, URL, error message, prose, etc. "
@@ -48,7 +48,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "File Watcher Agent",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You monitor file system changes reported by a local event bus. "
             "When a file is created, modified, or deleted, summarize the change and assess "
@@ -62,7 +62,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "Notification Summarizer",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You summarize desktop notifications forwarded by a local event bus. "
             "Group related notifications, filter noise, and surface anything the user "
@@ -75,7 +75,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "Terminal Helper",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You observe shell commands executed by the user, forwarded via a local event bus. "
             "When you see a command, briefly note what it does. If it looks like the user hit "
@@ -89,7 +89,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "Webhook Handler",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You process webhook events from external systems forwarded by a local event bus. "
             "Webhooks may come from CI/CD pipelines, version control, monitoring, home automation, "
@@ -106,7 +106,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "Scheduled Task Agent",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You handle scheduled (cron) events from a local event bus. "
             "These are periodic triggers — health checks, cleanup scans, summary requests, audits, etc. "
@@ -123,7 +123,7 @@ _DEFAULT_AGENTS: list[dict] = [
     },
     {
         "name": "System Log Analyst",
-        "model": "llama3.1:8b",
+        "model": "gemma4:latest",
         "system_prompt": (
             "You are a Linux system log analyst embedded in a local event bus. "
             "You receive journal/syslog entries classified as errors, warnings, auth events, "

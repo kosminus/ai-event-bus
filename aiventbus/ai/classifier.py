@@ -49,7 +49,7 @@ class EventClassifier:
     def __init__(
         self,
         ollama: OllamaClient,
-        model: str = "gemma3:latest",
+        model: str = "gemma4:latest",
         timeout_seconds: int = 10,
     ):
         self.ollama = ollama

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Event Bus</title>
-    <link rel="stylesheet" href="/style.css?v=2">
+    <link rel="stylesheet" href="/style.css?v=5">
 </head>
 <body>
     <div class="app">
@@ -31,6 +31,10 @@
                 <div class="nav-item" data-view="agents" onclick="navigate('agents')">
                     <span>Agents</span>
                     <span class="count" id="agent-count">0</span>
+                </div>
+                <div class="nav-item" data-view="approvals" onclick="navigate('approvals')">
+                    <span>Approvals</span>
+                    <span class="count" id="approval-count">0</span>
                 </div>
                 <div class="nav-item" data-view="producers" onclick="navigate('producers')">
                     <span>Producers</span>
@@ -59,7 +63,7 @@
     <!-- Toast notifications -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/app.js?v=2"></script>
+    <script src="/app.js?v=5"></script>
     <script>
         // Update sidebar counts reactively
         const origRender = render;
@@ -68,8 +72,10 @@
             origRender();
             const ec = document.getElementById('event-count');
             const ac = document.getElementById('agent-count');
+            const pc = document.getElementById('approval-count');
             if (ec) ec.textContent = state.events.length;
             if (ac) ac.textContent = state.agents.length;
+            if (pc) pc.textContent = state.pendingActions.length;
         };
     </script>
 </body>

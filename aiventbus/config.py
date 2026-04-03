@@ -18,7 +18,7 @@ class ServerConfig:
 @dataclass
 class OllamaConfig:
     base_url: str = "http://localhost:11434"
-    default_model: str = "llama3.1:8b"
+    default_model: str = "gemma4:latest"
     request_timeout: int = 120
 
 
@@ -72,7 +72,7 @@ class PolicyConfig:
 @dataclass
 class ClassifierConfig:
     enabled: bool = False
-    model: str = "gemma3:latest"
+    model: str = "gemma4:latest"
     timeout_seconds: int = 10
 
 

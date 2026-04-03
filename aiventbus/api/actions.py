@@ -35,6 +35,11 @@ async def list_pending(limit: int = 50):
     return await _action_repo.list_pending(limit=limit)
 
 
+@router.get("/history")
+async def list_history(limit: int = 50):
+    return await _action_repo.list_recent(limit=limit)
+
+
 @router.get("/{action_id}")
 async def get_action(action_id: str):
     action = await _action_repo.get(action_id)

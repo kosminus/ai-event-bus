@@ -776,6 +776,14 @@ class PendingActionRepository:
         rows = await cursor.fetchall()
         return [self._row_to_action(r) for r in rows]
 
+    async def list_recent(self, limit: int = 50) -> list[PendingAction]:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM pending_actions ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_action(r) for r in rows]
+
     async def approve(self, action_id: str) -> PendingAction | None:
         await self.db.conn.execute(
             "UPDATE pending_actions SET status = 'approved', resolved_at = ? WHERE id = ? AND status = 'waiting_confirmation'",

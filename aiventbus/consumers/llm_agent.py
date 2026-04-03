@@ -360,6 +360,27 @@ class LLMAgentConsumer(BaseConsumer):
         if decision.trust_mode == TrustMode.auto:
             result = await self.executor.execute(action_type, action)
             logger.info("Auto-executed %s for agent %s: %s", action_type, self.agent.id, result)
+            # Store and broadcast auto-executed actions so they appear in history/UI
+            if self.action_repo:
+                auto_action = PendingAction(
+                    assignment_id=response.assignment_id if hasattr(response, "assignment_id") else "",
+                    agent_id=self.agent.id,
+                    event_id=source_event.id,
+                    action_type=action_type,
+                    action_data=action,
+                    trust_mode=TrustMode.auto,
+                    status=ActionStatus.completed,
+                    policy_reason=decision.reason,
+                )
+                await self.action_repo.create(auto_action)
+                await self.action_repo.update_result(auto_action.id, ActionStatus.completed, result)
+            await self.ws_hub.broadcast("system", "action.executed", {
+                "action_id": auto_action.id if self.action_repo else None,
+                "agent_id": self.agent.id,
+                "action_type": action_type,
+                "action_data": action,
+                "result": result,
+            })
             return
 
         # TrustMode.confirm — queue for user approval
