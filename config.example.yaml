@@ -1,0 +1,72 @@
+server:
+  host: "0.0.0.0"
+  port: 8420
+
+ollama:
+  base_url: "http://localhost:11434"
+  default_model: "gemma4:latest"
+  request_timeout: 120
+
+database:
+  path: "./aiventbus.db"
+
+bus:
+  dedupe_window_seconds: 60
+  max_fan_out: 3
+  max_chain_depth: 10
+  max_chain_budget: 20
+
+logging:
+  level: "INFO"
+
+producers:
+  clipboard_enabled: true
+  clipboard_poll_interval_ms: 500
+  clipboard_min_length: 10
+  file_watcher_enabled: false
+  file_watcher_paths: ["~/Downloads", "~/Documents"]
+  dbus_enabled: false
+  terminal_monitor_enabled: false
+  journald_enabled: false
+  journald_priority_filter: 4        # 4=warning+, 3=error+, 7=all
+  journald_units: []                 # e.g. ["sshd", "docker"]
+  webhook_enabled: false
+  # webhook_secret: "my-secret-token"  # Bearer token / HMAC secret
+  webhook_default_priority: "medium"
+  cron_enabled: false
+  cron_timezone: "UTC"
+  cron_jobs: []
+  # cron_jobs:
+  #   - name: health_check
+  #     expression: "*/5 * * * *"
+  #     topic: cron.health.check
+  #   - name: daily_summary
+  #     expression: "0 9 * * *"
+  #     topic: cron.daily.summary
+
+tools:
+  http_request_enabled: true
+  http_request_timeout: 30           # seconds per request
+  http_request_max_size: 1048576     # 1MB response cap
+  playwright_enabled: false          # pip install playwright && playwright install chromium
+  playwright_headless: true
+  playwright_timeout: 30000          # ms per browser action
+
+policy:
+  trust_overrides: {}
+  # trust_overrides:
+  #   tool_call: "auto"             # auto-approve tool calls (default: confirm)
+  #   http_request: "confirm"       # require approval for HTTP requests (default: auto)
+  shell_timeout_seconds: 30
+
+lanes:
+  interactive_prefixes: ["user."]
+  critical_prefixes: ["security.", "system.failure"]
+  reserve_interactive_slot: true
+
+classifier:
+  enabled: false
+  model: "gemma4:latest"
+  timeout_seconds: 10
+
+seed_defaults: true
