@@ -72,21 +72,31 @@ async def approve_action(action_id: str):
     if not action:
         raise HTTPException(404, "Action not found or not awaiting confirmation")
 
-    # Execute the approved action
-    result = await _executor.execute(action.action_type, action.action_data)
-    await _action_repo.update_result(action_id, ActionStatus.completed, result)
+    # Execute the approved action. If the executor raises, we still need to
+    # record a failure result and resume the waiting assignment — otherwise
+    # the tool-use loop stays suspended forever with no way to recover.
+    try:
+        result = await _executor.execute(action.action_type, action.action_data)
+        status = ActionStatus.completed
+    except Exception as exc:
+        result = {"error": f"{type(exc).__name__}: {exc}"}
+        status = ActionStatus.failed
 
-    # Broadcast approval
+    await _action_repo.update_result(action_id, status, result)
+
     await _ws_hub.broadcast("system", "action.approved", {
         "action_id": action_id,
         "action_type": action.action_type,
         "result": result,
+        "status": status.value,
     })
 
-    # Resume any assignment that was suspended waiting on this action
     await _resume_if_waiting(action_id)
 
-    return {"action_id": action_id, "status": "completed", "result": result}
+    if status == ActionStatus.failed:
+        raise HTTPException(500, f"Action execution failed: {result['error']}")
+
+    return {"action_id": action_id, "status": status.value, "result": result}
 
 
 @router.post("/{action_id}/deny")

@@ -194,7 +194,10 @@ class LLMAgentConsumer(BaseConsumer):
             final_summary: str | None = None
             final_response_text: str | None = None
 
-            while iteration < max_iters:
+            # Loop invariant: iteration counts completed tool batches. The LLM
+            # always gets one more turn after the last batch to synthesize
+            # results — we only gate *executing new actions* on the cap.
+            while True:
                 # If we were suspended mid-batch, pick up remaining actions without calling LLM
                 if not state.get("remaining_actions") and not state.get("last_assistant_json"):
                     # Fresh iteration — call the LLM
@@ -222,6 +225,21 @@ class LLMAgentConsumer(BaseConsumer):
                         # Terminal — final answer produced
                         break
 
+                    if iteration >= max_iters:
+                        # Cap reached: LLM saw the last batch's results and is
+                        # still asking for more. Accept its summary as terminal.
+                        logger.warning(
+                            "Agent %s hit max_tool_iterations (%d) on event %s",
+                            self.agent.id, max_iters, event.id,
+                        )
+                        await self.bus._emit_system_event("system.tool_loop_exhausted", {
+                            "agent_id": self.agent.id,
+                            "event_id": event.id,
+                            "iterations": iteration,
+                        })
+                        final_summary = (final_summary or "") + " [iteration cap reached]"
+                        break
+
                     state["last_assistant_json"] = raw
                     state["remaining_actions"] = list(actions)
 
@@ -242,16 +260,6 @@ class LLMAgentConsumer(BaseConsumer):
                 state["remaining_actions"] = []
                 iteration += 1
                 await self._persist_state(assignment, state, iteration, waiting_action_id=None, status=AssignmentStatus.running)
-
-            # Iteration cap guard
-            if iteration >= max_iters and state.get("remaining_actions"):
-                logger.warning("Agent %s hit max_tool_iterations (%d) on event %s", self.agent.id, max_iters, event.id)
-                await self.bus._emit_system_event("system.tool_loop_exhausted", {
-                    "agent_id": self.agent.id,
-                    "event_id": event.id,
-                    "iterations": iteration,
-                })
-                final_summary = (final_summary or "") + " [iteration cap reached]"
 
             # Persist assistant memory turn with final summary
             if final_response_text:
