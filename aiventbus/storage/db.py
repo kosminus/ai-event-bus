@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS event_assignments (
     started_at TEXT,
     completed_at TEXT,
     error_message TEXT,
+    conversation TEXT,
+    iteration INTEGER DEFAULT 0,
+    waiting_action_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_assignments_event ON event_assignments(event_id);
@@ -216,6 +219,19 @@ class Database:
             await self._conn.execute("ALTER TABLE events ADD COLUMN trace_id TEXT")
             await self._conn.commit()
             logger.info("Migration: added 'trace_id' column to events")
+
+        # Add tool-use loop state columns to event_assignments if missing
+        cursor = await self._conn.execute("PRAGMA table_info(event_assignments)")
+        asgn_cols = {row[1] for row in await cursor.fetchall()}
+        for col, ddl in [
+            ("conversation", "ALTER TABLE event_assignments ADD COLUMN conversation TEXT"),
+            ("iteration", "ALTER TABLE event_assignments ADD COLUMN iteration INTEGER DEFAULT 0"),
+            ("waiting_action_id", "ALTER TABLE event_assignments ADD COLUMN waiting_action_id TEXT"),
+        ]:
+            if col not in asgn_cols:
+                await self._conn.execute(ddl)
+                await self._conn.commit()
+                logger.info("Migration: added '%s' column to event_assignments", col)
 
     async def close(self) -> None:
         """Close the database connection."""

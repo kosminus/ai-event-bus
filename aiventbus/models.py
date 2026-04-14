@@ -43,6 +43,8 @@ class AssignmentStatus(str, Enum):
     pending = "pending"
     claimed = "claimed"
     running = "running"
+    waiting_confirmation = "waiting_confirmation"
+    resumable = "resumable"
     completed = "completed"
     failed = "failed"
     retry_wait = "retry_wait"
@@ -250,6 +252,9 @@ class EventAssignment(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    conversation: dict[str, Any] | None = None
+    iteration: int = 0
+    waiting_action_id: str | None = None
     created_at: datetime = Field(default_factory=_now)
 
 

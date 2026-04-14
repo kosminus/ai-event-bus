@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 
 from aiventbus.core.executor import Executor
 from aiventbus.core.bus import EventBus, WebSocketHub
 from aiventbus.models import ActionStatus
-from aiventbus.storage.repositories import PendingActionRepository
+from aiventbus.storage.repositories import AssignmentRepository, PendingActionRepository
 
 router = APIRouter(prefix="/api/v1/actions", tags=["actions"])
 
@@ -15,6 +17,8 @@ _action_repo: PendingActionRepository | None = None
 _executor: Executor | None = None
 _bus: EventBus | None = None
 _ws_hub: WebSocketHub | None = None
+_assignment_repo: AssignmentRepository | None = None
+_agent_manager: Any = None
 
 
 def init(
@@ -22,12 +26,26 @@ def init(
     executor: Executor,
     bus: EventBus,
     ws_hub: WebSocketHub,
+    assignment_repo: AssignmentRepository | None = None,
+    agent_manager: Any = None,
 ) -> None:
-    global _action_repo, _executor, _bus, _ws_hub
+    global _action_repo, _executor, _bus, _ws_hub, _assignment_repo, _agent_manager
     _action_repo = action_repo
     _executor = executor
     _bus = bus
     _ws_hub = ws_hub
+    _assignment_repo = assignment_repo
+    _agent_manager = agent_manager
+
+
+async def _resume_if_waiting(action_id: str) -> None:
+    """If an assignment is suspended waiting on this action, wake it up."""
+    if not (_assignment_repo and _agent_manager):
+        return
+    assignment = await _assignment_repo.find_by_waiting_action(action_id)
+    if not assignment:
+        return
+    await _agent_manager.resume_assignment(assignment.id, assignment.agent_id)
 
 
 @router.get("/pending")
@@ -65,6 +83,9 @@ async def approve_action(action_id: str):
         "result": result,
     })
 
+    # Resume any assignment that was suspended waiting on this action
+    await _resume_if_waiting(action_id)
+
     return {"action_id": action_id, "status": "completed", "result": result}
 
 
@@ -80,5 +101,8 @@ async def deny_action(action_id: str, reason: str | None = None):
         "action_type": action.action_type,
         "reason": reason,
     })
+
+    # Resume any assignment that was suspended waiting on this action
+    await _resume_if_waiting(action_id)
 
     return {"action_id": action_id, "status": "denied"}

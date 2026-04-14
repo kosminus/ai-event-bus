@@ -81,23 +81,51 @@ def query(ctx, text: str, wait: bool, timeout: int):
     if not wait:
         return
 
-    # Poll for response
+    # Poll for response. The agent runs a tool-use loop — there may be many
+    # intermediate responses; we surface the terminal one (no proposed_actions),
+    # or if the loop is suspended on a confirm-gated action we tell the user.
     start = time.monotonic()
+    announced_action_ids: set[str] = set()
+    last_summary_printed: str | None = None
     while time.monotonic() - start < timeout:
-        r = client.get(f"/api/v1/events/{event_id}/responses")
-        if r.status_code == 200:
-            responses = r.json()
-            if responses:
-                resp = responses[0]
-                parsed = resp.get("parsed_output")
-                if parsed:
-                    click.echo(f"\n{parsed.get('summary', '')}")
-                    if parsed.get("proposed_actions"):
-                        click.echo(f"\nActions: {json.dumps(parsed['proposed_actions'], indent=2)}")
-                else:
-                    click.echo(f"\n{resp.get('response_text', '')[:500]}")
-                click.echo(f"\n(model: {resp.get('model_used')}, {resp.get('duration_ms')}ms)")
+        event_r = client.get(f"/api/v1/events/{event_id}")
+        event_status = event_r.json().get("status") if event_r.status_code == 200 else None
+
+        responses_r = client.get(f"/api/v1/events/{event_id}/responses")
+        responses = responses_r.json() if responses_r.status_code == 200 else []
+
+        # Stream intermediate summaries as the loop runs
+        if responses:
+            latest = responses[-1]
+            parsed = latest.get("parsed_output") or {}
+            summary = parsed.get("summary", "")
+            if summary and summary != last_summary_printed:
+                click.echo(f"\n{summary}")
+                last_summary_printed = summary
+            actions = parsed.get("proposed_actions") or []
+
+            # Terminal: no more proposed actions and event is marked complete
+            if event_status == "completed" and not actions:
+                click.echo(f"\n(model: {latest.get('model_used')}, {latest.get('duration_ms')}ms)")
                 return
+
+        # Show new pending actions so the user knows to approve/deny
+        pending_r = client.get("/api/v1/actions/pending")
+        if pending_r.status_code == 200:
+            for a in pending_r.json():
+                if a.get("event_id") == event_id and a["id"] not in announced_action_ids:
+                    announced_action_ids.add(a["id"])
+                    click.echo(
+                        f"\n[pending confirmation] {a['id']}  {a['action_type']}"
+                        f"\n  {json.dumps(a.get('action_data', {}), indent=2)}"
+                        f"\n  approve:  aibus approve {a['id']}"
+                        f"\n  deny:     aibus deny {a['id']}"
+                    )
+
+        if event_status in ("failed", "expired"):
+            click.echo(f"\nEvent ended with status: {event_status}", err=True)
+            sys.exit(1)
+
         time.sleep(1)
 
     click.echo("Timeout waiting for response", err=True)
