@@ -4,6 +4,7 @@ This guide walks you through installing aiventbus, creating your first agent, an
 
 ## Prerequisites
 
+- **Linux (Ubuntu/Debian recommended)** — required. Deep OS integration via DBus, inotify, notify-send, and systemd. macOS and Windows are not supported.
 - **Python 3.11+**
 - **Ollama** running locally — install from [ollama.com](https://ollama.com), then pull a model:
   ```bash

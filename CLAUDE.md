@@ -55,7 +55,7 @@ aiventbus/
 │   ├── assignments.py       # Pull-based routing + assignment creation + priority lanes
 │   ├── lifecycle.py         # Expiry sweeper, retry scheduler
 │   ├── policy.py            # Policy engine: blocklist, allowlist, trust modes
-│   ├── executor.py          # Action executor: shell, file, notify, http_request, tool_call
+│   ├── executor.py          # Action executor: shell, file, notify, http_request, set_knowledge, get_knowledge, tool_call
 │   ├── tools.py             # ToolBackend base class + ToolRegistry for pluggable tools
 │   └── compression.py       # Backpressure (not yet implemented)
 ├── ai/
@@ -123,7 +123,7 @@ widget/
 - **Chain reactions**: agent `emit_event` actions publish back to the bus with `parent_event` lineage and inherited `trace_id`
 - **Knowledge store**: durable key-value facts in SQLite, auto-seeded with system info, injected into prompts
 - **Classifier fallback**: unmatched events optionally routed by a lightweight LLM classifier
-- **System topics**: `system.unmatched`, `system.parse_failure`, `system.agent_failure`, `system.chain_limit`, `system.action_denied`
+- **System topics**: `system.unmatched`, `system.parse_failure`, `system.agent_failure`, `system.chain_limit`, `system.action_denied`, `system.unknown_action`
 
 ## API
 

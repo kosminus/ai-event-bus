@@ -37,8 +37,7 @@ Existing AI agent frameworks (LangChain, CrewAI) are request/response. This is e
 |----------|--------|-------|
 | **Ubuntu/Debian** | Full support | Primary target. DBus, inotify, notify-send, systemd |
 | **Arch/Fedora** | Should work | Same Linux APIs, untested |
-| **macOS** | Partial | Core bus + agents work. No DBus, limited producers. Planned for future |
-| **Windows** | Not supported | Different OS APIs entirely |
+| **macOS / Windows** | Not supported | Different OS APIs — Linux-only |
 
 **Hardware:** Works on any machine with Ollama. Benefits from a GPU (NVIDIA recommended) for faster inference. Tested on RTX 5090 + RTX 6000 Pro with 70B+ models.
 
@@ -221,10 +220,11 @@ Agent prompts are generated dynamically — they list only the action types actu
 ## Architecture
 
 ```
-┌─────────── PRODUCERS ─────────────┐
-│  clipboard, file_watcher, terminal │
-│  dbus_listener, manual (API/UI)    │
-└──────────────┬─────────────────────┘
+┌─────────────── PRODUCERS ─────────────────┐
+│  clipboard, file_watcher, terminal,        │
+│  dbus_listener, journald, webhook, cron,   │
+│  manual (API/UI)                            │
+└──────────────┬─────────────────────────────┘
                ▼
         ┌──────────────┐
         │   EVENT BUS   │  SQLite persistence, dedupe, chain limits
