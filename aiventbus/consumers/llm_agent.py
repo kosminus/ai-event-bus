@@ -449,6 +449,14 @@ class LLMAgentConsumer(BaseConsumer):
         """
         action_type = action.get("action_type")
 
+        # Some models wrap parameters in a nested "params" dict instead of
+        # flattening them at the top level. Normalize both shapes so handlers
+        # see a single flat dict.
+        if isinstance(action.get("params"), dict):
+            merged = {k: v for k, v in action["params"].items() if k not in action}
+            if merged:
+                action = {**action, **merged}
+
         # Built-in bus actions
         if action_type == "emit_event":
             topic = action.get("topic") or source_event.output_topic
