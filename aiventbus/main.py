@@ -133,6 +133,15 @@ class AgentManager:
     def is_running(self, agent_id: str) -> bool:
         return agent_id in self._consumers
 
+    async def resume_assignment(self, assignment_id: str, agent_id: str) -> None:
+        """Mark a suspended assignment as resumable and wake its agent consumer."""
+        await self.assignment_repo.mark_resumable(assignment_id)
+        consumer = self._consumers.get(agent_id)
+        if consumer:
+            await consumer.notify()
+        else:
+            logger.warning("resume_assignment: agent %s not running", agent_id)
+
 
 # Global app state
 _config: AppConfig | None = None
@@ -294,7 +303,7 @@ async def lifespan(app: FastAPI):
     routing_rules.init(rule_repo)
     ws.init(ws_hub)
     system.init(_db, _config)
-    actions.init(action_repo, executor, _bus, ws_hub)
+    actions.init(action_repo, executor, _bus, ws_hub, assignment_repo=assignment_repo, agent_manager=_agent_manager)
     knowledge.init(knowledge_repo)
 
     # Initialize and start producers

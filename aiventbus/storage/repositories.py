@@ -439,7 +439,7 @@ class AssignmentRepository:
         return assignment
 
     async def claim_next(self, agent_id: str, lane_filter: str | None = None) -> EventAssignment | None:
-        """Atomically claim the next pending assignment for an agent.
+        """Atomically claim the next pending or resumable assignment for an agent.
 
         Assignments are ordered by priority lane (interactive > critical > ambient),
         then by creation time within the same lane.
@@ -449,12 +449,12 @@ class AssignmentRepository:
         now = _now_iso()
         if lane_filter:
             subquery = """SELECT id FROM event_assignments
-                          WHERE agent_id = ? AND status = 'pending' AND lane = ?
+                          WHERE agent_id = ? AND status IN ('pending', 'resumable') AND lane = ?
                           ORDER BY created_at ASC LIMIT 1"""
             subquery_params = (agent_id, lane_filter)
         else:
             subquery = """SELECT id FROM event_assignments
-                          WHERE agent_id = ? AND status = 'pending'
+                          WHERE agent_id = ? AND status IN ('pending', 'resumable')
                           ORDER BY
                               CASE lane
                                   WHEN 'interactive' THEN 0
@@ -468,7 +468,7 @@ class AssignmentRepository:
         cursor = await self.db.conn.execute(
             f"""UPDATE event_assignments
                SET status = 'claimed', started_at = ?
-               WHERE id = ({subquery}) AND status = 'pending'""",
+               WHERE id = ({subquery}) AND status IN ('pending', 'resumable')""",
             (now, *subquery_params),
         )
         if cursor.rowcount == 0:
@@ -486,6 +486,45 @@ class AssignmentRepository:
         if not row:
             return None
         return self._row_to_assignment(row)
+
+    async def suspend(self, assignment_id: str, conversation: dict, iteration: int, waiting_action_id: str) -> None:
+        """Persist loop state and mark assignment as waiting on user confirmation."""
+        await self.db.conn.execute(
+            """UPDATE event_assignments
+               SET status = 'waiting_confirmation',
+                   conversation = ?,
+                   iteration = ?,
+                   waiting_action_id = ?
+               WHERE id = ?""",
+            (json.dumps(conversation), iteration, waiting_action_id, assignment_id),
+        )
+        await self.db.conn.commit()
+
+    async def mark_resumable(self, assignment_id: str) -> EventAssignment | None:
+        """Transition a suspended assignment back to resumable so claim_next picks it up."""
+        await self.db.conn.execute(
+            """UPDATE event_assignments
+               SET status = 'resumable'
+               WHERE id = ? AND status = 'waiting_confirmation'""",
+            (assignment_id,),
+        )
+        await self.db.conn.commit()
+        return await self.get(assignment_id)
+
+    async def get(self, assignment_id: str) -> EventAssignment | None:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM event_assignments WHERE id = ?", (assignment_id,),
+        )
+        row = await cursor.fetchone()
+        return self._row_to_assignment(row) if row else None
+
+    async def find_by_waiting_action(self, action_id: str) -> EventAssignment | None:
+        cursor = await self.db.conn.execute(
+            "SELECT * FROM event_assignments WHERE waiting_action_id = ? LIMIT 1",
+            (action_id,),
+        )
+        row = await cursor.fetchone()
+        return self._row_to_assignment(row) if row else None
 
     async def update_status(self, assignment_id: str, status: AssignmentStatus, error_message: str | None = None) -> None:
         updates = {"status": status.value}
@@ -510,7 +549,7 @@ class AssignmentRepository:
 
     async def get_pending_count(self, agent_id: str) -> int:
         cursor = await self.db.conn.execute(
-            "SELECT COUNT(*) as cnt FROM event_assignments WHERE agent_id = ? AND status IN ('pending', 'claimed', 'running')",
+            "SELECT COUNT(*) as cnt FROM event_assignments WHERE agent_id = ? AND status IN ('pending', 'claimed', 'running', 'waiting_confirmation', 'resumable')",
             (agent_id,),
         )
         row = await cursor.fetchone()
@@ -524,6 +563,8 @@ class AssignmentRepository:
         return await cursor.fetchone() is not None
 
     def _row_to_assignment(self, row) -> EventAssignment:
+        keys = set(row.keys())
+        conv_raw = row["conversation"] if "conversation" in keys else None
         return EventAssignment(
             id=row["id"],
             event_id=row["event_id"],
@@ -536,6 +577,9 @@ class AssignmentRepository:
             started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
             completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
             error_message=row["error_message"],
+            conversation=json.loads(conv_raw) if conv_raw else None,
+            iteration=row["iteration"] if "iteration" in keys and row["iteration"] is not None else 0,
+            waiting_action_id=row["waiting_action_id"] if "waiting_action_id" in keys else None,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
