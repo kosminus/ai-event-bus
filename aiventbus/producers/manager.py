@@ -47,10 +47,27 @@ class ProducerManager:
         }
 
     def _runnable_reason(self, spec: ProducerSpec) -> str | None:
-        """Return ``None`` if the spec is runnable on this machine, else a reason."""
+        """Return ``None`` if the spec is runnable on this machine, else a reason.
+
+        Check order:
+
+        1. ``supported_platforms`` — does this codebase have a backend wired
+           up for the current OS? This runs before capability checks so the
+           reason reads "Not implemented on <OS> yet" instead of a
+           capability-specific error.
+        2. Required capabilities — every listed capability must be available.
+        3. At least one capability available — for producers with no
+           required capabilities but a declared capability set.
+        """
+        # 1. Supported-platforms gate.
+        if spec.supported_platforms is not None:
+            current = _platform.os_id()
+            if current not in spec.supported_platforms:
+                return f"Not implemented on {current} yet"
+
         all_caps = self._caps()
 
-        # Required capabilities: all must be available.
+        # 2. Required capabilities: all must be available.
         for cap in spec.required_capabilities:
             status = all_caps.get(cap)
             if status is None or not status.available:
@@ -60,7 +77,7 @@ class ProducerManager:
                     else f"Required capability '{cap.value}' unavailable"
                 )
 
-        # If no required capabilities, at least one listed capability must
+        # 3. If no required capabilities, at least one listed capability must
         # be available (otherwise the producer has nothing to do).
         if not spec.required_capabilities and spec.capabilities:
             any_available = any(

@@ -40,6 +40,21 @@ IS_MACOS: bool = sys.platform == "darwin"
 IS_WINDOWS: bool = sys.platform == "win32"
 
 
+def os_id() -> str:
+    """Short stable OS identifier used by ProducerSpec.supported_platforms.
+
+    Returns one of ``"linux"``, ``"darwin"``, ``"windows"``, or the raw
+    ``sys.platform`` value when the OS is unknown.
+    """
+    if IS_LINUX:
+        return "linux"
+    if IS_MACOS:
+        return "darwin"
+    if IS_WINDOWS:
+        return "windows"
+    return sys.platform
+
+
 # ---------------------------------------------------------------------------
 # Directories — one place defines where state lives on each OS.
 # ---------------------------------------------------------------------------

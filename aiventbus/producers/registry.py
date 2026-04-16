@@ -45,6 +45,14 @@ class ProducerSpec:
     skipping publishes for capabilities it can't back. ``required_capabilities``
     (optional) are capabilities that must all be available for the producer
     to start at all.
+
+    ``supported_platforms`` lists the OS identifiers on which this codebase
+    has a working backend for the producer. ``None`` means "any OS where the
+    capabilities resolve." Values are the short names returned by
+    ``aiventbus.platform.os_id``: ``"linux"``, ``"darwin"``, ``"windows"``.
+    When the current OS is absent from the set, the producer is advertised
+    as unavailable with a "Not implemented on <OS> yet" reason so the UI
+    never shows an Enable button for something that cannot start.
     """
 
     name: str
@@ -54,6 +62,7 @@ class ProducerSpec:
     factory: ProducerFactory
     is_enabled: EnabledPredicate
     required_capabilities: list[Capability] = field(default_factory=list)
+    supported_platforms: set[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +219,11 @@ REGISTRY: list[ProducerSpec] = [
         required_capabilities=[Capability.SYSTEM_LOG],
         factory=_build_system_log,
         is_enabled=lambda cfg: cfg.producers.journald_enabled,
+        # PR 4 adds the macOS log_stream backend. Until then the spec is
+        # honestly Linux-only, even though the SYSTEM_LOG capability reports
+        # available on macOS (the `log` binary exists; nothing in this
+        # codebase consumes it yet).
+        supported_platforms={"linux"},
     ),
     ProducerSpec(
         name="desktop_events",
@@ -233,6 +247,11 @@ REGISTRY: list[ProducerSpec] = [
         required_capabilities=[],
         factory=_build_desktop_events,
         is_enabled=lambda cfg: cfg.producers.dbus_enabled,
+        # PR 5 introduces the Swift sidecar + macOS backend. Until then,
+        # even if someone manually points ``$AIVENTBUS_MAC_HELPER`` at a
+        # stub binary and flips SESSION_STATE to available, the producer
+        # can't run — so gate explicitly.
+        supported_platforms={"linux"},
     ),
 ]
 
