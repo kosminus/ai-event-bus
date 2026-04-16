@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -387,7 +388,40 @@ def get_agent_manager() -> AgentManager:
 
 
 def cli():
-    """CLI entry point."""
+    """CLI entry point.
+
+    Flags are translated into environment variables so that the subsequently
+    loaded ``AppConfig`` (inside the FastAPI lifespan) picks them up via the
+    same deterministic resolver, regardless of where it's invoked from.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="aiventbus",
+        description="AI Event Bus — local AI control plane daemon.",
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to config.yaml (overrides $AIVENTBUS_CONFIG and platform default).",
+    )
+    parser.add_argument(
+        "--db",
+        help="Path to the SQLite DB (overrides $AIVENTBUS_DB and platform default).",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Dev mode — allow CWD fallbacks for config.yaml and aiventbus.db.",
+    )
+    args = parser.parse_args()
+
+    if args.config:
+        os.environ["AIVENTBUS_CONFIG"] = args.config
+    if args.db:
+        os.environ["AIVENTBUS_DB"] = args.db
+    if args.dev:
+        os.environ["AIVENTBUS_DEV"] = "1"
+
     config = load_config()
     uvicorn.run(
         "aiventbus.main:app",
