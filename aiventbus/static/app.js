@@ -812,23 +812,40 @@ function renderProducers() {
         return;
     }
 
-    el.innerHTML = state.producers.map(p => `
+    el.innerHTML = state.producers.map(p => {
+        const caps = p.capabilities || {};
+        const capRows = Object.keys(caps).map(name => {
+            const c = caps[name];
+            const cls = c.available ? 'completed' : 'expired';
+            const backend = c.backend ? ` · ${escapeHtml(c.backend)}` : '';
+            const reason = !c.available && c.reason ? ` — ${escapeHtml(c.reason)}` : '';
+            return `<div style="font-size:11px;color:var(--text-secondary);margin-top:2px">
+                <span class="event-status ${cls}" style="margin-right:4px">${escapeHtml(name)}</span>${backend}${reason}
+            </div>`;
+        }).join('');
+        const unavailable = !p.available;
+        const unavailableNote = unavailable && p.unavailable_reason
+            ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">${escapeHtml(p.unavailable_reason)}</div>`
+            : '';
+        const actionBtn = unavailable
+            ? `<button class="btn btn-sm" disabled title="${escapeHtml(p.unavailable_reason || 'unavailable')}">Unavailable</button>`
+            : p.running
+                ? `<button class="btn btn-sm btn-danger" onclick="toggleProducer('${p.name}', false)">Disable</button>`
+                : `<button class="btn btn-sm btn-primary" onclick="toggleProducer('${p.name}', true)">Enable</button>`;
+        return `
         <div class="producer-card">
-            <div class="agent-status-indicator ${p.running ? 'idle' : 'disabled'}"></div>
+            <div class="agent-status-indicator ${p.running ? 'idle' : (unavailable ? 'error' : 'disabled')}"></div>
             <div class="agent-name">${p.name}</div>
             <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">${escapeHtml(p.description)}</div>
-            <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
-                <span class="event-status ${p.running ? 'completed' : 'expired'}">${p.running ? 'running' : 'stopped'}</span>
-                <span class="capability-tag">${p.type}</span>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                <span class="event-status ${p.running ? 'completed' : 'expired'}">${p.running ? 'running' : (unavailable ? 'unavailable' : 'stopped')}</span>
+                ${(p.topics || []).map(t => `<span class="capability-tag">${escapeHtml(t)}</span>`).join('')}
             </div>
-            <div style="margin-top:8px">
-                ${p.running
-                    ? `<button class="btn btn-sm btn-danger" onclick="toggleProducer('${p.name}', false)">Disable</button>`
-                    : `<button class="btn btn-sm btn-primary" onclick="toggleProducer('${p.name}', true)">Enable</button>`
-                }
-            </div>
-        </div>
-    `).join('');
+            <div>${capRows}</div>
+            ${unavailableNote}
+            <div style="margin-top:8px">${actionBtn}</div>
+        </div>`;
+    }).join('');
 }
 
 async function toggleProducer(name, enable) {
