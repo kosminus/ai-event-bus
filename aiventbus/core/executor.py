@@ -16,6 +16,7 @@ from typing import Any, Callable, Awaitable
 
 import httpx
 
+from aiventbus import platform as _platform
 from aiventbus.core.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -201,31 +202,49 @@ class Executor:
     async def _handle_notify(self, data: dict) -> dict:
         title = data.get("title", "AI Event Bus")
         message = data.get("message", "")
+        notifier = _platform.notifier()
+        if notifier is None:
+            return {
+                "error": (
+                    "No notification backend available on this platform "
+                    "(install libnotify-bin on Linux; osascript ships with macOS)"
+                )
+            }
+        cmd = notifier.build_command(title=title, message=message)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "notify-send", title, message,
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.communicate()
-            return {"sent": True, "title": title}
+            return {"sent": True, "title": title, "backend": notifier.backend}
         except FileNotFoundError:
-            return {"error": "notify-send not found — install libnotify-bin"}
+            return {"error": f"Notifier binary missing: {notifier.executable}"}
         except Exception as e:
             return {"error": str(e)}
 
     async def _handle_open_app(self, data: dict) -> dict:
         target = data.get("target", "")
+        opener = _platform.opener()
+        if opener is None:
+            return {
+                "error": (
+                    "No opener backend available on this platform "
+                    "(install xdg-utils on Linux; `open` ships with macOS)"
+                )
+            }
+        cmd = opener.build_command(target=target)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "xdg-open", target,
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.communicate()
-            return {"opened": True, "target": target}
+            return {"opened": True, "target": target, "backend": opener.backend}
         except FileNotFoundError:
-            return {"error": "xdg-open not found"}
+            return {"error": f"Opener binary missing: {opener.executable}"}
         except Exception as e:
             return {"error": str(e)}
 
