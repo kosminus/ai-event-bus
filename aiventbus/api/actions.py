@@ -58,6 +58,53 @@ async def list_history(limit: int = 50):
     return await _action_repo.list_recent(limit=limit)
 
 
+@router.post("/deny-pending")
+async def deny_pending_bulk(agent_id: str | None = None, reason: str | None = None):
+    """Deny every action currently ``waiting_confirmation``.
+
+    Useful when a chatty agent has queued a pile of proposals — one
+    click clears them all and wakes the suspended assignments so the
+    agents unblock. Pass ``agent_id`` to scope the sweep to a single
+    agent, or leave it unset to drain the whole queue.
+    """
+    if _action_repo is None:
+        raise HTTPException(503, "Action repository not initialized")
+
+    default_reason = reason or (
+        "Bulk denied from the Approvals tab"
+        if not agent_id
+        else f"Bulk denied for agent {agent_id}"
+    )
+
+    ids = await _action_repo.list_pending_ids(agent_id=agent_id)
+    denied: list[str] = []
+    failed: list[dict] = []
+
+    for action_id in ids:
+        try:
+            action = await _action_repo.deny(action_id, default_reason)
+            if action is None:
+                # Row raced another resolver — already denied or approved.
+                continue
+            denied.append(action_id)
+
+            await _ws_hub.broadcast("system", "action.denied", {
+                "action_id": action_id,
+                "action_type": action.action_type,
+                "reason": default_reason,
+            })
+            await _resume_if_waiting(action_id)
+        except Exception as exc:  # noqa: BLE001 — report, don't stop the sweep.
+            failed.append({"action_id": action_id, "error": f"{type(exc).__name__}: {exc}"})
+
+    return {
+        "denied": denied,
+        "failed": failed,
+        "agent_id": agent_id,
+        "reason": default_reason,
+    }
+
+
 @router.get("/{action_id}")
 async def get_action(action_id: str):
     action = await _action_repo.get(action_id)

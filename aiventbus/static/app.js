@@ -605,10 +605,35 @@ async function testAgent(agentId) {
 function renderApprovalsView(el) {
     const pending = state.pendingActions;
     const resolved = (state.actionHistory || []).filter(a => a.status !== 'waiting_confirmation');
+
+    // Group pending by agent so we can offer "Deny all from <agent>" when
+    // more than one agent is spamming the queue.
+    const byAgent = {};
+    for (const a of pending) {
+        const id = a.agent_id || 'unknown';
+        byAgent[id] = (byAgent[id] || 0) + 1;
+    }
+    const agentChips = Object.entries(byAgent)
+        .sort((a, b) => b[1] - a[1])
+        .map(([agentId, count]) => `
+            <button class="btn btn-sm" onclick="denyAllPending('${escapeAttr(agentId)}')"
+                    title="Deny the ${count} pending action${count !== 1 ? 's' : ''} from ${escapeAttr(agentId)}">
+                Deny ${count} from ${escapeHtml(agentId)}
+            </button>
+        `).join(' ');
+
     el.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:12px;flex-wrap:wrap">
             <h2 style="font-size:16px">Pending Approvals</h2>
-            <span style="color:var(--text-muted);font-size:12px">${pending.length} action${pending.length !== 1 ? 's' : ''} awaiting review</span>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="color:var(--text-muted);font-size:12px">
+                    ${pending.length} action${pending.length !== 1 ? 's' : ''} awaiting review
+                </span>
+                ${pending.length > 1 && Object.keys(byAgent).length > 1 ? agentChips : ''}
+                ${pending.length > 0
+                    ? `<button class="btn btn-sm btn-danger" onclick="denyAllPending()">Deny all (${pending.length})</button>`
+                    : ''}
+            </div>
         </div>
         <div id="approvals-list">
             ${pending.length === 0
@@ -623,6 +648,27 @@ function renderApprovalsView(el) {
             ${resolved.map(a => renderHistoryCard(a)).join('')}
         </div>` : ''}
     `;
+}
+
+async function denyAllPending(agentId) {
+    const scope = agentId
+        ? state.pendingActions.filter(a => (a.agent_id || '') === agentId).length
+        : state.pendingActions.length;
+    if (scope === 0) return;
+    const label = agentId ? ` from ${agentId}` : '';
+    if (!confirm(`Deny ${scope} pending action${scope !== 1 ? 's' : ''}${label}? This cannot be undone.`)) return;
+    try {
+        const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+        const res = await api(`/actions/deny-pending${qs}`, { method: 'POST' });
+        const denied = (res && res.denied) ? res.denied.length : 0;
+        state.pendingActions = agentId
+            ? state.pendingActions.filter(a => (a.agent_id || '') !== agentId)
+            : [];
+        if (state.currentView === 'approvals') renderApprovalsView(document.getElementById('main-content'));
+        showToast(`Denied ${denied} action${denied !== 1 ? 's' : ''}`, 'success');
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+    }
 }
 
 function renderActionCard(action) {
@@ -912,6 +958,11 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function escapeAttr(text) {
+    // Safe for use inside single-quoted HTML attributes in inline handlers.
+    return String(text ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 // --- Init ---

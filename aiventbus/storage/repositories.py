@@ -820,6 +820,29 @@ class PendingActionRepository:
         rows = await cursor.fetchall()
         return [self._row_to_action(r) for r in rows]
 
+    async def list_pending_ids(self, agent_id: str | None = None) -> list[str]:
+        """Cheap ID-only scan of everything still waiting on confirmation.
+
+        Used by the bulk-deny endpoint so we don't have to rehydrate every
+        action row. An optional ``agent_id`` filter lets callers nuke just
+        one noisy agent's queue without touching others.
+        """
+        if agent_id:
+            cursor = await self.db.conn.execute(
+                "SELECT id FROM pending_actions "
+                "WHERE status = 'waiting_confirmation' AND agent_id = ? "
+                "ORDER BY created_at ASC",
+                (agent_id,),
+            )
+        else:
+            cursor = await self.db.conn.execute(
+                "SELECT id FROM pending_actions "
+                "WHERE status = 'waiting_confirmation' "
+                "ORDER BY created_at ASC",
+            )
+        rows = await cursor.fetchall()
+        return [r["id"] for r in rows]
+
     async def list_recent(self, limit: int = 50) -> list[PendingAction]:
         cursor = await self.db.conn.execute(
             "SELECT * FROM pending_actions ORDER BY created_at DESC LIMIT ?",
