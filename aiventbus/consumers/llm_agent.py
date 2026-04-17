@@ -57,6 +57,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERATIONS = 5
 
+# Actions allowed for non-reactive (passive) agents — only bus-local,
+# no external side effects. Everything else (tool_call, shell_exec,
+# file_*, http_request, notify, open_app, set_knowledge, get_knowledge)
+# is gated off so the agent can observe and announce but not execute.
+_PASSIVE_ALLOWED_ACTIONS = {"emit_event", "log", "alert"}
+
 
 @dataclass
 class ActionOutcome:
@@ -456,6 +462,18 @@ class LLMAgentConsumer(BaseConsumer):
             merged = {k: v for k, v in action["params"].items() if k not in action}
             if merged:
                 action = {**action, **merged}
+
+        # Passive agents may only emit events / log / alert. Block everything
+        # else before it reaches the executor or tool registry.
+        if not self.agent.reactive and action_type not in _PASSIVE_ALLOWED_ACTIONS:
+            reason = f"agent is passive (non-reactive); {action_type} blocked"
+            await self.bus._emit_system_event("system.action_denied", {
+                "agent_id": self.agent.id,
+                "event_id": source_event.id,
+                "action_type": action_type,
+                "reason": reason,
+            })
+            return ActionOutcome(kind="denied", action=action, reason=reason)
 
         # Built-in bus actions
         if action_type == "emit_event":

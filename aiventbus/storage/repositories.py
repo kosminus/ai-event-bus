@@ -254,18 +254,20 @@ class AgentRepository:
             max_concurrent=data.max_concurrent,
             queue_size=data.queue_size,
             memory_scope=data.memory_scope,
+            reactive=data.reactive,
             config=data.config,
         )
         await self.db.conn.execute(
             """INSERT INTO agents (id, name, model, system_prompt, description,
                fallback_model, capabilities, max_concurrent, queue_size,
-               memory_scope, config, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               memory_scope, reactive, config, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 agent.id, agent.name, agent.model, agent.system_prompt,
                 agent.description, agent.fallback_model,
                 json.dumps(agent.capabilities), agent.max_concurrent,
-                agent.queue_size, agent.memory_scope, json.dumps(agent.config),
+                agent.queue_size, agent.memory_scope, int(agent.reactive),
+                json.dumps(agent.config),
                 agent.status.value, now, now,
             ),
         )
@@ -291,6 +293,8 @@ class AgentRepository:
             data["capabilities"] = json.dumps(data["capabilities"])
         if "config" in data:
             data["config"] = json.dumps(data["config"])
+        if "reactive" in data:
+            data["reactive"] = int(bool(data["reactive"]))
         data["updated_at"] = _now_iso()
         set_clause = ", ".join(f"{k} = ?" for k in data)
         values = list(data.values()) + [agent_id]
@@ -315,6 +319,8 @@ class AgentRepository:
         await self.db.conn.commit()
 
     def _row_to_agent(self, row) -> Agent:
+        keys = set(row.keys())
+        reactive = bool(row["reactive"]) if "reactive" in keys and row["reactive"] is not None else True
         return Agent(
             id=row["id"],
             name=row["name"],
@@ -326,6 +332,7 @@ class AgentRepository:
             max_concurrent=row["max_concurrent"],
             queue_size=row["queue_size"],
             memory_scope=row["memory_scope"],
+            reactive=reactive,
             config=json.loads(row["config"] or "{}"),
             status=row["status"],
             created_at=datetime.fromisoformat(row["created_at"]),

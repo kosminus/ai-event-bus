@@ -109,11 +109,22 @@ class ContextEngine:
 
         The available action types are generated dynamically from the executor
         so new tools (Playwright, MCP, http_request, etc.) appear automatically.
+        Passive (non-reactive) agents get a restricted action list — emit/log/alert
+        only — and no tool backend docs.
         """
         parts = [agent.system_prompt]
 
-        # Build action type docs dynamically
-        action_docs = self._build_action_docs()
+        action_docs = self._build_action_docs(agent)
+
+        passive_note = (
+            "\n\n## Passive mode\n\n"
+            "You are running in passive mode. You may ONLY propose `emit_event`, "
+            "`log`, or `alert` actions — no shell execution, filesystem writes, "
+            "HTTP requests, notifications, knowledge writes, or tool calls. "
+            "Requests for any other action will be denied. Prefer emitting a "
+            "structured event on the bus for other agents or producers to pick "
+            "up instead of trying to act directly.\n"
+        ) if not agent.reactive else ""
 
         parts.append(
             "\n\nYou are an AI agent connected to the AI Event Bus. "
@@ -146,44 +157,60 @@ class ContextEngine:
             "result first.\n"
             "- Actions that require user confirmation will pause the loop until "
             "the user approves or denies; the denial reason is returned as the "
-            "action result.\n\n"
+            "action result.\n"
+            f"{passive_note}\n"
             "## Available action types\n\n"
             "You may ONLY use the following action types. Do NOT invent new ones.\n\n"
             f"{action_docs}\n"
             "Respond ONLY with the JSON object, no additional text."
         )
 
-        # Tool backend details
-        tool_docs = self._build_tool_docs()
-        if tool_docs:
-            parts.append(f"\n## External tools\n\n{tool_docs}")
+        # Tool backend details — hidden from passive agents since tool_call is blocked
+        if agent.reactive:
+            tool_docs = self._build_tool_docs()
+            if tool_docs:
+                parts.append(f"\n## External tools\n\n{tool_docs}")
 
         if agent.capabilities:
             parts.append(f"\nYour capabilities: {', '.join(agent.capabilities)}")
         return "\n".join(parts)
 
-    def _build_action_docs(self) -> str:
-        """Generate action type documentation from the executor."""
+    def _build_action_docs(self, agent: Agent | None = None) -> str:
+        """Generate action type documentation from the executor.
+
+        When ``agent`` is passive (``reactive=False``), only ``emit_event``,
+        ``log``, and ``alert`` are listed so the LLM doesn't propose actions
+        the consumer would then reject.
+        """
+        passive = agent is not None and not agent.reactive
+        passive_allowed = {"emit_event", "log", "alert"}
+
         if not self.executor:
             # Fallback: minimal hardcoded list (shouldn't happen in practice)
-            return (
-                '- **emit_event**: Publish a new event. Params: topic, payload\n'
-                '- **log**: Log a message. Params: message\n'
-                '- **alert**: Broadcast an alert. Params: message\n'
-                '- **notify**: Desktop notification. Params: title, message\n'
-                '- **shell_exec**: Run a shell command. Params: command, cwd, timeout\n'
-                '- **http_request**: HTTP request. Params: url, method, headers, body\n'
-                '- **file_read**: Read a file. Params: path\n'
-                '- **file_write**: Write a file. Params: path, content\n'
-                '- **file_delete**: Delete a file. Params: path\n'
-                '- **open_app**: Open URL/file. Params: target\n'
-                '- **set_knowledge**: Store a fact. Params: key, value\n'
-                '- **get_knowledge**: Retrieve a fact. Params: key or prefix\n'
-            )
+            lines = [
+                '- **emit_event**: Publish a new event. Params: topic, payload',
+                '- **log**: Log a message. Params: message',
+                '- **alert**: Broadcast an alert. Params: message',
+            ]
+            if not passive:
+                lines.extend([
+                    '- **notify**: Desktop notification. Params: title, message',
+                    '- **shell_exec**: Run a shell command. Params: command, cwd, timeout',
+                    '- **http_request**: HTTP request. Params: url, method, headers, body',
+                    '- **file_read**: Read a file. Params: path',
+                    '- **file_write**: Write a file. Params: path, content',
+                    '- **file_delete**: Delete a file. Params: path',
+                    '- **open_app**: Open URL/file. Params: target',
+                    '- **set_knowledge**: Store a fact. Params: key, value',
+                    '- **get_knowledge**: Retrieve a fact. Params: key or prefix',
+                ])
+            return "\n".join(lines) + "\n"
 
         lines = []
         for action in self.executor.list_available_actions():
             at = action["action_type"]
+            if passive and at not in passive_allowed:
+                continue
             desc = action.get("description", "")
             params = action.get("params", {})
             param_str = ", ".join(f"{k}: {v}" for k, v in params.items()) if params else ""

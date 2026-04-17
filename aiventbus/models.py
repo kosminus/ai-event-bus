@@ -157,6 +157,7 @@ class AgentCreate(BaseModel):
     max_concurrent: int = 1
     queue_size: int = 50
     memory_scope: str | None = None
+    reactive: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -172,6 +173,7 @@ class Agent(BaseModel):
     max_concurrent: int = 1
     queue_size: int = 50
     memory_scope: str | None = None
+    reactive: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
     status: AgentStatus = AgentStatus.idle
     created_at: datetime = Field(default_factory=_now)

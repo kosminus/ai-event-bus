@@ -51,6 +51,12 @@ async def update_agent(agent_id: str, data: dict):
     agent = await _agent_repo.update(agent_id, data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    # Consumers snapshot the Agent model at start — restart so config changes
+    # (reactive mode, model, prompt, capabilities…) take effect immediately.
+    mgr = _get_agent_manager()
+    if mgr and mgr.is_running(agent_id) and agent.status.value != "disabled":
+        await mgr.stop_agent(agent_id)
+        await mgr.start_agent(agent_id)
     return agent
 
 

@@ -277,14 +277,22 @@ function renderAgents() {
     el.innerHTML = state.agents.map(agent => {
         const stream = state.agentStreams[agent.id] || '';
         const caps = agent.capabilities.map(c => `<span class="capability-tag">${c}</span>`).join('');
+        const isReactive = agent.reactive !== false;
+        const modeTag = isReactive
+            ? `<span class="capability-tag" title="Full tool access: shell, files, HTTP, tool_call, etc.">reactive</span>`
+            : `<span class="capability-tag" style="background:var(--accent-purple);color:#fff" title="Emits events only — tool_call / shell / files are blocked">passive</span>`;
+        const modeBtn = isReactive
+            ? `<button class="btn btn-sm" onclick="setAgentReactive('${agent.id}', false)" title="Block tool_call and OS actions — agent will only emit events">Make Passive</button>`
+            : `<button class="btn btn-sm" onclick="setAgentReactive('${agent.id}', true)" title="Allow tool_call, shell_exec, file writes, etc.">Make Reactive</button>`;
         return `
         <div class="agent-card">
             <div class="agent-status-indicator ${agent.status}"></div>
             <div class="agent-name">${agent.name}</div>
             <div class="agent-model">${agent.model}</div>
-            <div class="agent-capabilities">${caps || '<span class="capability-tag">general</span>'}</div>
-            <div style="display:flex;gap:4px;margin-top:8px">
+            <div class="agent-capabilities">${modeTag}${caps || '<span class="capability-tag">general</span>'}</div>
+            <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap">
                 <button class="btn btn-sm" onclick="testAgent('${agent.id}')">Test</button>
+                ${modeBtn}
                 ${agent.status === 'disabled'
                     ? `<button class="btn btn-sm" onclick="enableAgent('${agent.id}')">Enable</button>`
                     : `<button class="btn btn-sm btn-danger" onclick="disableAgent('${agent.id}')">Disable</button>`
@@ -518,6 +526,15 @@ function showCreateAgent() {
             <label>Capabilities (comma-separated)</label>
             <input id="agent-caps" placeholder="security, code" />
         </div>
+        <div class="form-group">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input id="agent-reactive" type="checkbox" checked style="width:auto" />
+                <span>Reactive (allow tool_call, shell, file, HTTP actions)</span>
+            </label>
+            <div style="color:var(--text-muted);font-size:12px;margin-top:4px">
+                Unchecked = passive: agent may only emit events / log / alert. Tool calls and OS actions are blocked.
+            </div>
+        </div>
     `, async () => {
         const caps = document.getElementById('agent-caps').value
             .split(',').map(s => s.trim()).filter(Boolean);
@@ -528,12 +545,22 @@ function showCreateAgent() {
                 model: document.getElementById('agent-model').value,
                 system_prompt: document.getElementById('agent-prompt').value || undefined,
                 capabilities: caps,
+                reactive: document.getElementById('agent-reactive').checked,
             }),
         });
         closeModal();
         showToast('Agent created', 'success');
         refreshData();
     });
+}
+
+async function setAgentReactive(id, reactive) {
+    await api(`/agents/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ reactive }),
+    });
+    showToast(`Agent set to ${reactive ? 'reactive' : 'passive'}`, 'success');
+    refreshData();
 }
 
 function showCreateRule() {

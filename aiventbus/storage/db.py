@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS agents (
     max_concurrent INTEGER DEFAULT 1,
     queue_size INTEGER DEFAULT 50,
     memory_scope TEXT,
+    reactive INTEGER DEFAULT 1,
     config TEXT DEFAULT '{}',
     status TEXT DEFAULT 'idle',
     created_at TEXT DEFAULT (datetime('now')),
@@ -232,6 +233,14 @@ class Database:
                 await self._conn.execute(ddl)
                 await self._conn.commit()
                 logger.info("Migration: added '%s' column to event_assignments", col)
+
+        # Add reactive column to agents if missing
+        cursor = await self._conn.execute("PRAGMA table_info(agents)")
+        agent_cols = {row[1] for row in await cursor.fetchall()}
+        if "reactive" not in agent_cols:
+            await self._conn.execute("ALTER TABLE agents ADD COLUMN reactive INTEGER DEFAULT 1")
+            await self._conn.commit()
+            logger.info("Migration: added 'reactive' column to agents")
 
     async def close(self) -> None:
         """Close the database connection."""
