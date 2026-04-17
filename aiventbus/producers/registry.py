@@ -148,17 +148,16 @@ def _build_system_log(bus: EventBus, cfg: AppConfig) -> BaseProducer | None:
 
 
 def _build_desktop_events(bus: EventBus, cfg: AppConfig) -> BaseProducer | None:
-    """Desktop events producer (DBus on Linux, Swift helper on macOS).
+    """Desktop-events producer: DBus on Linux, Swift helper on macOS."""
+    from aiventbus.producers.desktop_events import (
+        DesktopEventsProducer,
+        build_default_backend,
+    )
 
-    PR 5 will unify the Linux and macOS backends under a single
-    ``desktop_events`` package. Until then, we dispatch to the existing
-    ``dbus_listener`` on Linux and return ``None`` elsewhere.
-    """
-    if _platform.IS_LINUX:
-        from aiventbus.producers.dbus_listener import DBusListenerProducer
-
-        return DBusListenerProducer(bus=bus)
-    return None
+    backend = build_default_backend(bus=bus)
+    if backend is None:
+        return None
+    return DesktopEventsProducer(backend=backend)
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +244,12 @@ REGISTRY: list[ProducerSpec] = [
         required_capabilities=[],
         factory=_build_desktop_events,
         is_enabled=lambda cfg: cfg.producers.dbus_enabled,
-        # PR 5 introduces the Swift sidecar + macOS backend. Until then,
-        # even if someone manually points ``$AIVENTBUS_MAC_HELPER`` at a
-        # stub binary and flips SESSION_STATE to available, the producer
-        # can't run — so gate explicitly.
-        supported_platforms={"linux"},
+        # Linux (DBus) and macOS (Swift sidecar) both have backends now.
+        # The capability layer still reports NOTIFICATIONS_RECEIVED as
+        # unavailable on macOS and APP_LIFECYCLE as unavailable on Linux,
+        # so the per-capability status in /api/v1/producers tells the full
+        # story without needing an OS pin here.
+        supported_platforms={"linux", "darwin"},
     ),
 ]
 

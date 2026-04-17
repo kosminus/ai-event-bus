@@ -40,3 +40,7 @@ node_modules/
 
 # Claude
 .claude/
+# Swift build artifacts
+bin/aiventbus-mac-helper/.build/
+bin/aiventbus-mac-helper/.swiftpm/
+
