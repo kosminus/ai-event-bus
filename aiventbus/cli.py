@@ -378,6 +378,32 @@ def uninstall_cmd(purge: bool):
     click.echo("Uninstall complete.")
 
 
+@cli.command("restart")
+def restart_cmd():
+    """Restart the installed daemon via the platform's service manager.
+
+    Linux: `systemctl --user restart aiventbus.service`
+    macOS: `launchctl kickstart -k gui/<uid>/com.aiventbus.daemon`
+
+    Requires `aibus install` to have set up the service. A foreground
+    `python -m aiventbus` run has no supervisor to restart, so stop
+    the process and relaunch it instead.
+    """
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    from aiventbus.install import restart as _restart, NoServiceInstalled
+
+    try:
+        msg = _restart()
+    except NoServiceInstalled as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+    except Exception as e:
+        click.echo(f"Restart failed: {e}", err=True)
+        raise SystemExit(1)
+    click.echo(msg)
+
+
 def main():
     cli(obj={})
 
