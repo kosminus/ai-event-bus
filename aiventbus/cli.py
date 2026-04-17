@@ -342,6 +342,42 @@ def shell_hook(ctx, install: bool):
     click.echo(f"Run: source {rc_file}")
 
 
+@cli.command("install")
+@click.option("--dev", is_flag=True,
+              help="Dev install: symlink the Swift helper instead of copying, so rebuilds are picked up.")
+@click.option("--build-helper", is_flag=True,
+              help="macOS only: build bin/aiventbus-mac-helper (release) and install it.")
+def install_cmd(dev: bool, build_helper: bool):
+    """Install the daemon as a systemd user unit (Linux) or LaunchAgent (macOS)."""
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    from aiventbus.install import install as _install
+
+    try:
+        _install(dev=dev, build_helper=build_helper)
+    except Exception as e:
+        click.echo(f"Install failed: {e}", err=True)
+        raise SystemExit(1)
+    click.echo("Install complete.")
+
+
+@cli.command("uninstall")
+@click.option("--purge", is_flag=True,
+              help="Also delete the config, data (DB), and log directories.")
+def uninstall_cmd(purge: bool):
+    """Disable and remove the installed service + helper binary."""
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    from aiventbus.install import uninstall as _uninstall
+
+    try:
+        _uninstall(purge=purge)
+    except Exception as e:
+        click.echo(f"Uninstall failed: {e}", err=True)
+        raise SystemExit(1)
+    click.echo("Uninstall complete.")
+
+
 def main():
     cli(obj={})
 
