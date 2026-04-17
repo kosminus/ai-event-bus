@@ -1,8 +1,8 @@
 # AI Event Bus
 
-A local-first AI control plane for **Linux** — an event-driven runtime that sits between your operating system and LLM agents via [Ollama](https://ollama.com). It gives your machine ambient intelligence: agents that watch, decide, and act on your behalf.
+A local-first AI control plane for **Linux and macOS** — an event-driven runtime that sits between your operating system and LLM agents via [Ollama](https://ollama.com). It gives your machine ambient intelligence: agents that watch, decide, and act on your behalf.
 
-Built for **Ubuntu/Debian** and Linux desktops (GNOME, KDE). Deep OS integration via DBus, inotify, systemd, and desktop notifications. Runs entirely on your machine — no cloud, no API keys, no data leaves your box.
+Deep OS integration per platform: DBus + inotify + systemd + notify-send on Linux; unified logging (`log stream`) + `NSWorkspace` + AppleScript notifications + launchd on macOS. Runs entirely on your machine — no cloud, no API keys, no data leaves your box.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -11,7 +11,8 @@ Built for **Ubuntu/Debian** and Linux desktops (GNOME, KDE). Deep OS integration
 │           aiventbus control plane            │
 │  events → routing → context → agents → acts  │
 ├─────────────────────────────────────────────┤
-│        Linux OS (DBus, systemd, fs)          │
+│   OS (Linux: DBus + systemd + inotify /      │
+│        macOS: NSWorkspace + launchd + log)   │
 ├─────────────────────────────────────────────┤
 │        Hardware (GPU, disk, network)          │
 └─────────────────────────────────────────────┘
@@ -37,13 +38,16 @@ Existing AI agent frameworks (LangChain, CrewAI) are request/response. This is e
 |----------|--------|-------|
 | **Ubuntu/Debian** | Full support | Primary target. DBus, inotify, notify-send, systemd |
 | **Arch/Fedora** | Should work | Same Linux APIs, untested |
-| **macOS / Windows** | Not supported | Different OS APIs — Linux-only |
+| **macOS 12+** | Supported | `log stream`, `NSWorkspace`, pbpaste, osascript, launchd. Optional Swift helper (`aibus install --build-helper`) unlocks screen lock/unlock and app lifecycle capture. See [docs/macos-notes.md](docs/macos-notes.md). |
+| **Windows** | Not supported | Different OS APIs — open to PRs |
 
-**Hardware:** Works on any machine with Ollama. Benefits from a GPU (NVIDIA recommended) for faster inference. Tested on RTX 5090 + RTX 6000 Pro with 70B+ models.
+Capability coverage is reported honestly in the Producers tab (and at `/api/v1/producers`): each producer lists which OS primitives it can reach and why any are unavailable. System-wide notification *content capture* is Linux-only — modern macOS requires a system extension.
+
+**Hardware:** Works on any machine with Ollama. Benefits from a GPU (NVIDIA recommended on Linux, Apple Silicon on macOS) for faster inference. Tested on RTX 5090 + RTX 6000 Pro with 70B+ models and on Apple M2 Pro.
 
 ## Quick start
 
-**Prerequisites:** Python 3.11+, Linux, [Ollama](https://ollama.com) running locally
+**Prerequisites:** Python 3.11+, [Ollama](https://ollama.com) running locally.
 
 ```bash
 # Install
@@ -53,6 +57,15 @@ pip install -e .
 # Run the daemon
 python -m aiventbus
 ```
+
+Want the daemon to autostart and survive reboots? Generate the systemd user unit (Linux) or launchd agent (macOS) with a single command:
+
+```bash
+aibus install                 # Linux: systemd user unit; macOS: LaunchAgent
+aibus install --build-helper  # macOS only: also build + install the Swift sidecar
+```
+
+Both forms generate the service unit from the live `sys.executable` + resolved config/DB/log paths, so a daemon launched by systemd or launchd uses the same state as a CLI run from the repo. `aibus uninstall` removes it; `aibus uninstall --purge` also deletes the data/config/log dirs.
 
 Open [http://localhost:8420](http://localhost:8420) for the dashboard. API docs at [http://localhost:8420/docs](http://localhost:8420/docs).
 
@@ -146,22 +159,24 @@ classifier:
   model: "gemma4:latest"
 ```
 
-## Linux integration
+## OS integration
 
-aiventbus hooks into the OS to observe and act:
+aiventbus hooks into the OS to observe and act. All OS-specific plumbing lives behind a single `aiventbus.platform` boundary; the rest of the code asks for capabilities and topics, not OS names.
 
-| Integration | How | What it does |
-|-------------|-----|-------------|
-| **Clipboard** | `wl-paste` / `xclip` | Monitors clipboard changes, agents can analyze copied text (stack traces, URLs, code) |
-| **File system** | `inotify` via watchfiles | Watches directories (Downloads, Documents), agents can triage/organize files |
-| **Desktop notifications** | DBus `org.freedesktop.Notifications` | Captures notifications from other apps, sends AI-generated notifications via `notify-send` |
-| **Session events** | DBus `org.freedesktop.login1` | Detects screen lock/unlock for context-aware behavior |
-| **Terminal** | Shell history monitoring | Watches bash/zsh history, agents can detect errors and suggest fixes |
-| **Shell commands** | `asyncio.subprocess` | Agents propose commands, policy engine gates them, executor runs approved ones |
-| **File operations** | Python pathlib | Agents can read/write/delete files (with policy confirmation) |
-| **HTTP requests** | `httpx` | Agents can fetch data from web APIs and URLs (auto-approved by default) |
-| **App launching** | `xdg-open` | Agents can open URLs and files in default applications |
-| **External tools** | ToolBackend plugins | Agents can call registered tool backends (Playwright, MCP, custom) via `tool_call` |
+| Integration | Linux backend | macOS backend |
+|---|---|---|
+| **Clipboard** | `xclip` / `wl-paste` polling | `pbpaste` polling |
+| **File system** | `inotify` via `watchfiles` | FSEvents via `watchfiles` |
+| **System log** | `journalctl -f -o json` | `log stream --style=ndjson --predicate …` |
+| **Screen lock / unlock** | DBus `org.freedesktop.login1.Session` | `NSDistributedNotificationCenter` (via Swift sidecar) |
+| **App launch / quit / activate** | Not exposed (inconsistent across DEs) | `NSWorkspace.notificationCenter` (via Swift sidecar) |
+| **Inbound notifications** | DBus `org.freedesktop.Notifications` (Monitor) | Not supported without a system extension |
+| **Outbound notifications** | `notify-send` | `osascript -e 'display notification …'` |
+| **App launching** | `xdg-open` | `open` |
+| **Terminal** | bash/zsh history polling + preexec hook (portable) | same |
+| **Shell / file / HTTP / tools** | portable (`asyncio.subprocess`, `pathlib`, `httpx`, `ToolBackend`) | same |
+
+Producers are registered once against capabilities, not OSes. On macOS, when the optional Swift helper isn't installed, the `desktop_events` producer reports `session_state` and `app_lifecycle` as unavailable with a concrete reason ("macOS helper not installed — run: `aibus install --build-helper`") rather than silently no-opping.
 
 ## Event schema
 
@@ -222,8 +237,8 @@ Agent prompts are generated dynamically — they list only the action types actu
 ```
 ┌─────────────── PRODUCERS ─────────────────┐
 │  clipboard, file_watcher, terminal,        │
-│  dbus_listener, journald, webhook, cron,   │
-│  manual (API/UI)                            │
+│  system_log, desktop_events, webhook,      │
+│  cron, manual (API/UI)                     │
 └──────────────┬─────────────────────────────┘
                ▼
         ┌──────────────┐

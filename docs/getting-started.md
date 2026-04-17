@@ -4,7 +4,7 @@ This guide walks you through installing aiventbus, creating your first agent, an
 
 ## Prerequisites
 
-- **Linux (Ubuntu/Debian recommended)** — required. Deep OS integration via DBus, inotify, notify-send, and systemd. macOS and Windows are not supported.
+- **Linux (Ubuntu/Debian recommended) or macOS 12+.** Deep OS integration per platform: DBus + inotify + systemd on Linux, `log stream` + `NSWorkspace` + launchd on macOS. See [macos-notes.md](macos-notes.md) for macOS specifics. Windows is not supported.
 - **Python 3.11+**
 - **Ollama** running locally — install from [ollama.com](https://ollama.com), then pull a model:
   ```bash
@@ -22,14 +22,22 @@ pip install -e .
 ## Start the daemon
 
 ```bash
-python -m aiventbus
+python -m aiventbus           # foreground, platform-default config + DB
+python -m aiventbus --dev     # repo-local config + DB (picks up ./config.yaml and ./aiventbus.db)
+```
+
+Or install it as a systemd user unit (Linux) or LaunchAgent (macOS) so it autostarts:
+
+```bash
+aibus install                 # autostart on login
+aibus install --build-helper  # macOS: also build + install the Swift sidecar
 ```
 
 You should see:
 ```
 AI Event Bus started on http://0.0.0.0:8420
 Ollama connected. Available models: [...]
-Clipboard producer started
+Clipboard producer started (pbpaste, interval=500ms)   # or xclip / wl-paste on Linux
 ```
 
 The daemon is now running. Open [http://localhost:8420](http://localhost:8420) to see the web dashboard.

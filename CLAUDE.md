@@ -2,9 +2,9 @@
 
 ## What is this project?
 
-**aiventbus** is a local-first AI control plane — an event-sourced runtime that sits between the Linux OS and LLM agents, giving your machine ambient intelligence via Ollama.
+**aiventbus** is a local-first AI control plane — an event-sourced runtime that sits between the OS (Linux or macOS) and LLM agents, giving your machine ambient intelligence via Ollama.
 
-Events flow from producers → through routing → to LLM agents (consumers) → through policy engine → to executor → whose outputs flow back as new events (chain reactions).
+Events flow from producers → through routing → to LLM agents (consumers) → through policy engine → to executor → whose outputs flow back as new events (chain reactions). All OS-specific plumbing lives behind a single `aiventbus.platform` boundary so the rest of the code thinks in capabilities and topics, not OS names.
 
 ## Tech stack
 
@@ -20,8 +20,11 @@ Events flow from producers → through routing → to LLM agents (consumers) →
 
 ```bash
 pip install -e .
-python -m aiventbus          # http://localhost:8420
+python -m aiventbus           # foreground — platform-default config + DB
+python -m aiventbus --dev     # allow CWD fallbacks (./config.yaml, ./aiventbus.db)
 ```
+
+Dashboard on `http://localhost:8420`. OpenAPI at `/docs`.
 
 CLI:
 ```bash
@@ -32,7 +35,14 @@ aibus approve <action_id>    # approve pending action
 aibus knowledge list         # list knowledge store
 aibus shell-hook             # print shell preexec hook script
 aibus shell-hook --install   # auto-append to ~/.bashrc or ~/.zshrc
+
+aibus install                # systemd user unit (Linux) / LaunchAgent (macOS)
+aibus install --build-helper # macOS only: build + install aiventbus-mac-helper
+aibus uninstall              # remove unit + helper
+aibus uninstall --purge      # also delete config / DB / log dirs
 ```
+
+Path resolution is deterministic. Order: `--config`/`--db` flag → `$AIVENTBUS_CONFIG` / `$AIVENTBUS_DB` → dev-mode CWD fallback (only under `--dev` / `$AIVENTBUS_DEV=1`) → platform default (`~/.config/aiventbus/` on Linux, `~/Library/Application Support/aiventbus/` on macOS). Never CWD by default, so a systemd/launchd-managed daemon resolves identically to an interactive CLI.
 
 Desktop widget:
 ```bash
@@ -67,17 +77,28 @@ aiventbus/
 ├── consumers/
 │   ├── base.py              # Abstract consumer
 │   └── llm_agent.py         # Ollama-backed agent worker (claim, process, stream, policy, execute)
+├── platform.py              # OS boundary: paths, capability flags, command builders, mac_helper_path
+├── install.py               # `aibus install` / `aibus uninstall` — systemd + launchd unit generators
 ├── shell_hook.sh            # Bash/zsh preexec hook for real-time terminal capture
 ├── producers/
 │   ├── base.py              # Abstract producer
-│   ├── manager.py           # ProducerManager (lifecycle, enable/disable at runtime)
-│   ├── clipboard.py         # Clipboard monitor (X11/Wayland)
-│   ├── file_watcher.py      # File system watcher (watchfiles/inotify)
-│   ├── dbus_listener.py     # DBus session bus listener (notifications, session lock)
+│   ├── manager.py           # Enumerates the registry, capability-gated start/stop
+│   ├── registry.py          # ProducerSpec + REGISTRY (name, capabilities, factory, supported_platforms)
+│   ├── clipboard.py         # Clipboard monitor (pbpaste on macOS, xclip/wl-paste on Linux)
+│   ├── file_watcher.py      # File system watcher (watchfiles → inotify/FSEvents)
 │   ├── terminal_monitor.py  # Shell history monitor (bash/zsh)
-│   ├── journald.py          # Systemd journal stream (errors, auth, services)
 │   ├── webhook.py           # HTTP webhook receiver (POST → bus events)
-│   └── cron.py              # Scheduled event emitter (cron/interval → bus events)
+│   ├── cron.py              # Scheduled event emitter (cron/interval → bus events)
+│   ├── system_log/          # Unified producer: journald on Linux, log stream on macOS
+│   │   ├── __init__.py      # SystemLogProducer + shared classifier + backend selector
+│   │   └── backends/
+│   │       ├── journald.py  # journalctl -f -o json
+│   │       └── log_stream.py# log stream --style=ndjson --predicate …
+│   └── desktop_events/      # Unified producer: DBus on Linux, Swift helper on macOS
+│       ├── __init__.py      # DesktopEventsProducer + backend selector
+│       └── backends/
+│           ├── dbus.py      # notifications + session lock via dbus_fast
+│           └── mac_helper.py# NDJSON stream from aiventbus-mac-helper
 ├── storage/
 │   ├── db.py                # SQLite schema (10 tables), connection, migrations
 │   ├── repositories.py      # CRUD for all entities
@@ -101,7 +122,7 @@ aiventbus/
 widget/
 ├── src-tauri/               # Rust/Tauri backend (tray, global shortcut, IPC)
 │   ├── Cargo.toml
-│   ├── tauri.conf.json
+│   ├── tauri.conf.json      # bundle targets: deb + appimage on Linux, dmg + app on macOS
 │   └── src/
 │       ├── main.rs
 │       └── lib.rs
@@ -109,6 +130,11 @@ widget/
     ├── index.html
     ├── style.css
     └── app.js
+
+bin/
+└── aiventbus-mac-helper/    # Swift sidecar — NDJSON stream of macOS desktop events
+    ├── Package.swift
+    └── Sources/aiventbus-mac-helper/main.swift
 ```
 
 ## Key concepts
@@ -159,11 +185,11 @@ Seven built-in producers capture events from OS activity, external systems, and 
 
 | Producer | Topics | How it works | Default |
 |---|---|---|---|
-| **Clipboard** | `clipboard.text` | Polls xclip/wl-paste for new clipboard text | Enabled |
-| **File Watcher** | `fs.created`, `fs.modified`, `fs.deleted` | Uses `watchfiles` (inotify) to watch directories recursively. Paths: `~/Downloads`, `~/Documents` by default. Ignores `*.swp`, `*.tmp`, `.git/*`, `__pycache__/*` | Disabled |
-| **DBus Listener** | `notification.received`, `session.locked`, `session.unlocked` | Subscribes to freedesktop DBus signals. Requires `dbus-fast` package | Disabled |
-| **Terminal Monitor** | `terminal.command` | Polls shell history file for new commands (supports bash and zsh extended format) | Disabled |
-| **Journald** | `syslog.error`, `syslog.warning`, `syslog.auth`, `syslog.service`, `syslog.info` | Streams `journalctl -f -o json`. Classifies by priority & facility. Filters noise by default | Disabled |
+| **Clipboard** | `clipboard.text` | Polls pbpaste (macOS) or xclip / wl-paste (Linux) for new clipboard text | Enabled |
+| **File Watcher** | `fs.created`, `fs.modified`, `fs.deleted` | `watchfiles` → inotify / FSEvents. Paths: `~/Downloads`, `~/Documents` by default. Ignores `*.swp`, `*.tmp`, `.git/*`, `__pycache__/*` | Disabled |
+| **Terminal Monitor** | `terminal.command` | Polls shell history file for new commands (bash + zsh extended format) | Disabled |
+| **System Log** | `syslog.error`, `syslog.warning`, `syslog.auth`, `syslog.service`, `syslog.info` | `journalctl -f -o json` on Linux or `log stream --style=ndjson --predicate …` on macOS. Shared classifier + per-OS noise filter. Classification produces identical topics + payload shape on both OSes | Disabled |
+| **Desktop Events** | `session.locked`, `session.unlocked`, `app.launched`, `app.terminated`, `app.activated`, `notification.received` | DBus on Linux (`dbus_fast`, notifications + login1 signals). Swift sidecar (`aiventbus-mac-helper`) on macOS for screen lock/unlock + NSWorkspace app lifecycle. Per-capability availability in `/api/v1/producers` | Disabled |
 | **Webhook** | `webhook.{path}` | Receives HTTP POST requests at `/api/v1/webhook/{path}` and publishes them as events. Supports Bearer token and GitHub HMAC auth | Disabled |
 | **Cron** | configurable per job | Publishes events on a cron schedule or at fixed intervals using APScheduler. Jobs configurable in config.yaml or via API at runtime | Disabled |
 
@@ -173,11 +199,12 @@ producers:
   clipboard_enabled: true
   file_watcher_enabled: true
   file_watcher_paths: ["~/Downloads", "~/Documents", "~/Projects"]
-  dbus_enabled: true
+  dbus_enabled: true                 # drives the unified desktop_events producer
   terminal_monitor_enabled: true
-  journald_enabled: true
+  journald_enabled: true             # drives the unified system_log producer (journald + log_stream)
   journald_priority_filter: 4        # 4=warning+ (default), 3=error+, 7=all; auth/service always pass through
-  journald_units: ["sshd", "docker"] # limit to specific units (empty = all)
+  journald_units: ["sshd", "docker"] # Linux-only: limit journalctl to specific units (empty = all)
+  # log_stream_predicate: 'subsystem == "com.apple.xpc.launchd"'  # macOS predicate override
   webhook_enabled: true
   webhook_secret: "my-secret-token"  # optional: Bearer token / HMAC secret
   cron_enabled: true
