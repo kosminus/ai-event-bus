@@ -367,3 +367,110 @@ def uninstall(*, purge: bool = False) -> None:
         _uninstall_macos(purge=purge)
     else:
         raise RuntimeError(f"`aibus uninstall` is not supported on {os_id}")
+
+
+# ---------------------------------------------------------------------------
+# Restart — delegates to systemctl (Linux) or launchctl (macOS)
+# ---------------------------------------------------------------------------
+
+class NoServiceInstalled(RuntimeError):
+    """Raised when `aibus restart` is called but no supervisor unit exists."""
+
+
+def _uid() -> int:
+    return os.getuid()
+
+
+def _is_systemd_unit_active() -> bool:
+    if not _platform.which("systemctl"):
+        return False
+    r = subprocess.run(
+        ["systemctl", "--user", "is-active", SYSTEMD_UNIT_NAME],
+        capture_output=True, text=True, check=False,
+    )
+    return r.returncode == 0 and r.stdout.strip() == "active"
+
+
+def _is_systemd_unit_installed() -> bool:
+    return (_systemd_unit_dir() / SYSTEMD_UNIT_NAME).is_file()
+
+
+def _is_launchd_agent_loaded() -> bool:
+    if not _platform.which("launchctl"):
+        return False
+    # `launchctl print gui/<uid>/<label>` returns 0 if the service exists in
+    # that domain (loaded or not), non-zero otherwise. Cheaper than parsing
+    # `launchctl list` output.
+    r = subprocess.run(
+        ["launchctl", "print", f"gui/{_uid()}/{LAUNCHD_LABEL}"],
+        capture_output=True, check=False,
+    )
+    return r.returncode == 0
+
+
+def _is_launchd_plist_present() -> bool:
+    return (_launchd_dir() / f"{LAUNCHD_LABEL}.plist").is_file()
+
+
+def restart() -> str:
+    """Ask the service manager to restart the daemon.
+
+    Returns a short human-readable string describing what happened,
+    suitable for printing to the CLI. Raises ``NoServiceInstalled`` if
+    the daemon isn't under a supervisor we can drive — in that case the
+    user is running foreground and should Ctrl+C + relaunch themselves.
+    """
+    os_id = _platform.os_id()
+    if os_id == "linux":
+        if not _is_systemd_unit_installed():
+            raise NoServiceInstalled(
+                "No systemd unit found at "
+                f"{_systemd_unit_dir() / SYSTEMD_UNIT_NAME} — "
+                "run `aibus install` first, or Ctrl+C and relaunch manually."
+            )
+        if not _platform.which("systemctl"):
+            raise RuntimeError("systemctl not on PATH")
+        r = subprocess.run(
+            ["systemctl", "--user", "restart", SYSTEMD_UNIT_NAME],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"systemctl restart failed (exit {r.returncode}): {r.stderr.strip() or r.stdout.strip()}"
+            )
+        return f"Restarted systemd unit: {SYSTEMD_UNIT_NAME}"
+
+    if os_id == "darwin":
+        if not _is_launchd_plist_present():
+            raise NoServiceInstalled(
+                "No LaunchAgent found at "
+                f"{_launchd_dir() / (LAUNCHD_LABEL + '.plist')} — "
+                "run `aibus install` first, or Ctrl+C and relaunch manually."
+            )
+        if not _platform.which("launchctl"):
+            raise RuntimeError("launchctl not on PATH")
+        target = f"gui/{_uid()}/{LAUNCHD_LABEL}"
+        r = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode != 0:
+            # Most common failure: service not loaded. Try bootstrap + retry
+            # once so the command is a useful "bring the thing up" hammer.
+            plist = _launchd_dir() / f"{LAUNCHD_LABEL}.plist"
+            subprocess.run(
+                ["launchctl", "bootstrap", f"gui/{_uid()}", str(plist)],
+                capture_output=True, check=False,
+            )
+            r = subprocess.run(
+                ["launchctl", "kickstart", "-k", target],
+                capture_output=True, text=True, check=False,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    "launchctl kickstart failed (exit "
+                    f"{r.returncode}): {r.stderr.strip() or r.stdout.strip()}"
+                )
+        return f"Restarted LaunchAgent: {LAUNCHD_LABEL}"
+
+    raise RuntimeError(f"`aibus restart` is not supported on {os_id}")

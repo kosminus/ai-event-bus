@@ -233,6 +233,47 @@ def deny(ctx, action_id: str, reason: str | None):
 
 
 @cli.command()
+@click.option("--agent", "agent_id", default=None,
+              help="Only cancel assignments + approvals belonging to this agent.")
+@click.option("--reason", default=None, help="Override the default cancellation reason.")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def drain(ctx, agent_id: str | None, reason: str | None, yes: bool):
+    """Cancel queued assignments and their pending approvals.
+
+    Flips every ``pending`` / ``claimed`` / ``waiting_confirmation`` /
+    ``resumable`` / ``retry_wait`` assignment to ``failed`` with a
+    stamped reason, and cascade-denies any linked pending actions so the
+    Approvals queue doesn't keep orphaned rows. ``running`` assignments
+    are left alone — those are actively making Ollama calls.
+
+    Pass ``--agent <id>`` to target one noisy agent.
+    """
+    scope = f"for agent {agent_id}" if agent_id else "for all agents"
+    if not yes:
+        click.echo(f"This will cancel all queued assignments {scope} "
+                   f"and deny any pending approvals tied to them.")
+        click.confirm("Continue?", abort=True)
+
+    client = _client(ctx.obj["url"])
+    params: dict = {}
+    if agent_id:
+        params["agent_id"] = agent_id
+    if reason:
+        params["reason"] = reason
+    r = client.post("/api/v1/assignments/cancel-pending", params=params)
+    if r.status_code != 200:
+        click.echo(f"Error: {r.text}", err=True)
+        sys.exit(1)
+    body = r.json()
+    click.echo(
+        f"Cancelled {len(body.get('cancelled_assignments', []))} assignments, "
+        f"cascade-denied {len(body.get('cascaded_actions', []))} approvals. "
+        f"Reason: {body.get('reason')}"
+    )
+
+
+@cli.command()
 @click.argument("trace_id")
 @click.pass_context
 def trace(ctx, trace_id: str):
@@ -376,6 +417,32 @@ def uninstall_cmd(purge: bool):
         click.echo(f"Uninstall failed: {e}", err=True)
         raise SystemExit(1)
     click.echo("Uninstall complete.")
+
+
+@cli.command("restart")
+def restart_cmd():
+    """Restart the installed daemon via the platform's service manager.
+
+    Linux: `systemctl --user restart aiventbus.service`
+    macOS: `launchctl kickstart -k gui/<uid>/com.aiventbus.daemon`
+
+    Requires `aibus install` to have set up the service. A foreground
+    `python -m aiventbus` run has no supervisor to restart, so stop
+    the process and relaunch it instead.
+    """
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO, format="%(message)s")
+    from aiventbus.install import restart as _restart, NoServiceInstalled
+
+    try:
+        msg = _restart()
+    except NoServiceInstalled as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+    except Exception as e:
+        click.echo(f"Restart failed: {e}", err=True)
+        raise SystemExit(1)
+    click.echo(msg)
 
 
 def main():

@@ -297,7 +297,7 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize API modules
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers, webhook, cron
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, producers, webhook, cron
 
     events.init(_bus, event_repo, assignment_repo, response_repo)
     agents.init(agent_repo, memory_repo)
@@ -305,6 +305,7 @@ async def lifespan(app: FastAPI):
     ws.init(ws_hub)
     system.init(_db, _config)
     actions.init(action_repo, executor, _bus, ws_hub, assignment_repo=assignment_repo, agent_manager=_agent_manager)
+    assignments.init(assignment_repo, action_repo, ws_hub)
     knowledge.init(knowledge_repo)
 
     # Initialize and start producers
@@ -358,7 +359,7 @@ def create_app() -> FastAPI:
     )
 
     # API routes
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, knowledge, producers, webhook, cron
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, producers, webhook, cron
 
     app.include_router(events.router)
     app.include_router(agents.router)
@@ -366,6 +367,7 @@ def create_app() -> FastAPI:
     app.include_router(ws.router)
     app.include_router(system.router)
     app.include_router(actions.router)
+    app.include_router(assignments.router)
     app.include_router(knowledge.router)
     app.include_router(producers.router)
     app.include_router(webhook.router)
