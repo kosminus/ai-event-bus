@@ -555,6 +555,57 @@ class AssignmentRepository:
         row = await cursor.fetchone()
         return row["cnt"] if row else 0
 
+    # Statuses that represent "live" assignments the scheduler may still
+    # touch. ``running`` is intentionally excluded from bulk-cancel:
+    # racing the agent that's actively issuing an Ollama call would leave
+    # us without a clean way to stop that call — the agent will finish on
+    # its own and the next loop iteration picks up the change.
+    _LIVE_STATUSES_FOR_DRAIN = (
+        "pending",
+        "claimed",
+        "waiting_confirmation",
+        "resumable",
+        "retry_wait",
+    )
+
+    async def cancel_pending(
+        self,
+        *,
+        agent_id: str | None = None,
+        reason: str = "cancelled via drain",
+    ) -> list[str]:
+        """Flip every drainable assignment to ``failed`` with a reason.
+
+        Returns the list of assignment IDs that were actually cancelled.
+        Rows already in a terminal state (``completed``, ``failed``, or
+        the unreachable ``running`` snapshot above) are left alone.
+        """
+        placeholders = ", ".join("?" * len(self._LIVE_STATUSES_FOR_DRAIN))
+        clause = f"status IN ({placeholders})"
+        params: list = list(self._LIVE_STATUSES_FOR_DRAIN)
+        if agent_id:
+            clause += " AND agent_id = ?"
+            params.append(agent_id)
+
+        # Snapshot the IDs first so callers (and the bus) can broadcast
+        # per-row notifications if they want to.
+        cursor = await self.db.conn.execute(
+            f"SELECT id FROM event_assignments WHERE {clause} ORDER BY created_at ASC",
+            params,
+        )
+        ids = [r["id"] for r in await cursor.fetchall()]
+        if not ids:
+            return []
+
+        await self.db.conn.execute(
+            f"UPDATE event_assignments "
+            f"SET status = 'failed', error_message = ?, completed_at = ? "
+            f"WHERE {clause}",
+            [reason, _now_iso(), *params],
+        )
+        await self.db.conn.commit()
+        return ids
+
     async def exists(self, event_id: str, agent_id: str) -> bool:
         cursor = await self.db.conn.execute(
             "SELECT 1 FROM event_assignments WHERE event_id = ? AND agent_id = ?",

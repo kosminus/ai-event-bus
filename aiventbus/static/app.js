@@ -239,8 +239,11 @@ function updateStats() {
             <div class="stat-label">Topics</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value">${s.active_assignments || 0}</div>
+            <div class="stat-value" style="${(s.active_assignments || 0) > 0 ? 'color:var(--accent-orange)' : ''}">${s.active_assignments || 0}</div>
             <div class="stat-label">Queue Depth</div>
+            ${(s.active_assignments || 0) > 0
+                ? `<button class="btn btn-sm btn-danger" style="margin-top:6px" onclick="drainAssignments()" title="Cancel queued assignments + cascade-deny their pending approvals">Drain</button>`
+                : ''}
         </div>
         <div class="stat-card" style="cursor:pointer" onclick="navigate('approvals')">
             <div class="stat-value" style="${state.pendingActions.length > 0 ? 'color:var(--accent-orange)' : ''}">${state.pendingActions.length}</div>
@@ -648,6 +651,31 @@ function renderApprovalsView(el) {
             ${resolved.map(a => renderHistoryCard(a)).join('')}
         </div>` : ''}
     `;
+}
+
+async function drainAssignments(agentId) {
+    const s = state.systemStatus || {};
+    const queueDepth = s.active_assignments || 0;
+    const label = agentId ? ` for ${agentId}` : '';
+    if (queueDepth === 0 && !agentId) {
+        showToast('Queue is already empty.', 'info');
+        return;
+    }
+    if (!confirm(
+        `Cancel all queued assignments${label} (~${queueDepth}) and cascade-deny any pending approvals?\n\n` +
+        `Running assignments are NOT cancelled (an agent is actively using them). This cannot be undone.`
+    )) return;
+    try {
+        const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : '';
+        const res = await api(`/assignments/cancel-pending${qs}`, { method: 'POST' });
+        const cancelled = (res && res.cancelled_assignments) ? res.cancelled_assignments.length : 0;
+        const cascaded = (res && res.cascaded_actions) ? res.cascaded_actions.length : 0;
+        showToast(`Drained ${cancelled} assignments, denied ${cascaded} approvals`, 'success');
+        // Refresh the stats + approvals since they're now empty/smaller.
+        refreshData();
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+    }
 }
 
 async function denyAllPending(agentId) {
