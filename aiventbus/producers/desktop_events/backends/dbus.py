@@ -1,7 +1,8 @@
-"""DBus listener producer — subscribes to session bus signals.
+"""DBus backend — Linux desktop-events source.
 
-Listens for desktop notifications, session lock/unlock, and media player state.
-Uses dbus-fast (async, native asyncio).
+Absorbs the former standalone ``aiventbus/producers/dbus_listener.py``.
+Monitors ``org.freedesktop.Notifications`` for inbound notifications
+and ``org.freedesktop.login1.Session`` for screen lock / unlock.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from aiventbus.producers.base import BaseProducer
 logger = logging.getLogger(__name__)
 
 
-class DBusListenerProducer(BaseProducer):
-    """Subscribes to DBus session bus signals and publishes events."""
+class DBusBackend(BaseProducer):
+    """Subscribes to DBus session-bus signals and publishes events."""
+
+    name = "dbus"
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -29,7 +32,7 @@ class DBusListenerProducer(BaseProducer):
     async def start(self) -> None:
         self._running = True
         self._task = asyncio.create_task(self._listen_loop())
-        logger.info("DBus listener started")
+        logger.info("desktop_events: dbus backend started")
 
     async def stop(self) -> None:
         self._running = False
@@ -44,7 +47,7 @@ class DBusListenerProducer(BaseProducer):
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("DBus listener stopped")
+        logger.info("desktop_events: dbus backend stopped")
 
     @property
     def is_running(self) -> bool:
@@ -55,11 +58,8 @@ class DBusListenerProducer(BaseProducer):
             from dbus_fast.aio import MessageBus
             from dbus_fast import MessageType, Message
 
-            # We need TWO connections:
-            # 1. A monitor connection (becomes read-only) to eavesdrop on Notify method calls
-            # 2. A normal connection for signal subscriptions (lock/unlock)
-
-            # --- Monitor connection for notifications ---
+            # Monitor connection (becomes read-only) to eavesdrop on
+            # Notify method calls.
             self._dbus_conn = await MessageBus().connect()
 
             monitor_rules = [
@@ -76,18 +76,24 @@ class DBusListenerProducer(BaseProducer):
                         body=[monitor_rules, 0],
                     )
                 )
-                logger.info("DBus: using Monitor interface for notification capture")
+                logger.info("desktop_events: DBus Monitor connected for notifications")
             except Exception as e:
-                # Fallback for older dbus-daemon without Monitor support
-                logger.warning("DBus: BecomeMonitor failed (%s), notifications may not be captured", e)
+                logger.warning(
+                    "desktop_events: BecomeMonitor failed (%s); "
+                    "notifications may not be captured",
+                    e,
+                )
 
             def monitor_handler(msg: Message) -> None:
-                if msg.member == "Notify" and msg.interface == "org.freedesktop.Notifications":
+                if (
+                    msg.member == "Notify"
+                    and msg.interface == "org.freedesktop.Notifications"
+                ):
                     asyncio.create_task(self._handle_notification(msg))
 
             self._dbus_conn.add_message_handler(monitor_handler)
 
-            # --- Signal connection for session lock/unlock ---
+            # Signal connection for session lock/unlock.
             self._signal_conn = await MessageBus().connect()
 
             for member in ("Lock", "Unlock"):
@@ -107,22 +113,24 @@ class DBusListenerProducer(BaseProducer):
             def signal_handler(msg: Message) -> None:
                 if msg.message_type == MessageType.SIGNAL:
                     if msg.member == "Lock":
-                        asyncio.create_task(self._handle_session_event("session.locked"))
+                        asyncio.create_task(self._handle_session("session.locked"))
                     elif msg.member == "Unlock":
-                        asyncio.create_task(self._handle_session_event("session.unlocked"))
+                        asyncio.create_task(self._handle_session("session.unlocked"))
 
             self._signal_conn.add_message_handler(signal_handler)
 
-            # Keep alive until stopped
             while self._running:
                 await asyncio.sleep(1)
 
         except ImportError:
-            logger.warning("dbus-fast not installed — DBus listener disabled (pip install dbus-fast)")
+            logger.warning(
+                "desktop_events: dbus-fast not installed — backend disabled "
+                "(pip install dbus-fast)"
+            )
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error("DBus listener error: %s", e)
+            logger.error("desktop_events: dbus backend error: %s", e)
 
     async def _handle_notification(self, msg) -> None:
         try:
@@ -147,9 +155,9 @@ class DBusListenerProducer(BaseProducer):
                 producer_id="producer_dbus",
             )
         except Exception as e:
-            logger.debug("Failed to handle notification: %s", e)
+            logger.debug("desktop_events: failed to handle notification: %s", e)
 
-    async def _handle_session_event(self, topic: str) -> None:
+    async def _handle_session(self, topic: str) -> None:
         await self.bus.publish(
             EventCreate(
                 topic=topic,
@@ -159,4 +167,4 @@ class DBusListenerProducer(BaseProducer):
             ),
             producer_id="producer_dbus",
         )
-        logger.info("Session event: %s", topic)
+        logger.info("desktop_events: session event %s", topic)

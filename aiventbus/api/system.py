@@ -45,6 +45,13 @@ async def system_status():
             "max_chain_depth": _config.bus.max_chain_depth,
             "max_fan_out": _config.bus.max_fan_out,
         },
+        "config_source": {
+            "config_path": _config.sources.config_path,
+            "config_path_source": _config.sources.config_path_source,
+            "db_path": _config.sources.db_path,
+            "db_path_source": _config.sources.db_path_source,
+            "dev_mode": _config.sources.dev_mode,
+        },
     }
 
 

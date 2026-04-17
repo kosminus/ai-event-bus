@@ -3,16 +3,61 @@
 Creates a useful starter set of agents and routes on first run so the bus
 works out of the box.  Skips if any agents already exist in the database.
 Controlled by ``seed_defaults: true`` in config (default).
+
+Agents whose prompts reference OS-specific tooling (the System Log
+Analyst in particular) are rendered from a template using
+``aiventbus.platform.platform_facts`` at seed time. That keeps the agent
+catalogue stable across OSes — one row per role, same name, same UI
+entry — while the prompt itself points at the right commands
+(``journalctl``/``systemctl`` on Linux, ``log show``/``launchctl`` on
+macOS). If prompt semantics ever genuinely diverge, split with a
+deliberate migration rather than pre-emptively.
 """
 
 from __future__ import annotations
 
 import logging
+from string import Template
 
+from aiventbus import platform as _platform
 from aiventbus.models import AgentCreate, RoutingRuleCreate
 from aiventbus.storage.repositories import AgentRepository, RoutingRuleRepository
 
 logger = logging.getLogger(__name__)
+
+
+_JSON_RESPONSE_SUFFIX = (
+    'Always respond with valid JSON: {"type": "analysis"|"action", "summary": "...", '
+    '"confidence": 0.0-1.0, "proposed_actions": []}.'
+)
+
+
+# ``string.Template`` uses $placeholders and leaves literal {} alone, which
+# matters because the JSON response suffix contains JSON braces that
+# str.format() would misinterpret.
+_SYSTEM_LOG_ANALYST_TEMPLATE = Template(
+    "You are a system log analyst embedded in a local event bus running on "
+    "$os_name. You receive log entries classified as errors, warnings, auth "
+    "events, or service state changes. For each entry:\n"
+    "- Explain what happened in plain language\n"
+    "- Assess severity (is this routine or does it need attention?)\n"
+    "- For auth events: flag failed logins, suspicious privilege escalation, "
+    "brute-force patterns\n"
+    "- For service failures: suggest diagnostic steps using $log_tools\n"
+    "- For errors: identify the root cause if possible\n"
+    "Do NOT be verbose for routine events — just note them briefly. "
+    "Be detailed and actionable for genuine problems. "
+    + _JSON_RESPONSE_SUFFIX
+)
+
+
+def _render_system_log_analyst_prompt() -> str:
+    """Fill the System Log Analyst prompt from live platform facts."""
+    facts = _platform.platform_facts()
+    return _SYSTEM_LOG_ANALYST_TEMPLATE.substitute(
+        os_name=facts.get("os_name") or "this machine",
+        log_tools=facts.get("log_tools") or "the system log tools",
+    )
 
 # ── Default agents ────────────────────────────────────────────────────
 # Each tuple: (AgentCreate kwargs, list of routing-rule defs that target it)
@@ -124,20 +169,11 @@ _DEFAULT_AGENTS: list[dict] = [
     {
         "name": "System Log Analyst",
         "model": "gemma4:latest",
-        "system_prompt": (
-            "You are a Linux system log analyst embedded in a local event bus. "
-            "You receive journal/syslog entries classified as errors, warnings, auth events, "
-            "or service state changes. For each entry:\n"
-            "- Explain what happened in plain language\n"
-            "- Assess severity (is this routine or does it need attention?)\n"
-            "- For auth events: flag failed logins, suspicious sudo usage, brute-force patterns\n"
-            "- For service failures: suggest diagnostic steps (journalctl -u, systemctl status)\n"
-            "- For errors: identify the root cause if possible\n"
-            "Do NOT be verbose for routine events — just note them briefly. "
-            "Be detailed and actionable for genuine problems. "
-            "Always respond with valid JSON: {\"type\": \"analysis\"|\"action\", \"summary\": \"...\", "
-            "\"confidence\": 0.0-1.0, \"proposed_actions\": []}."
-        ),
+        # Rendered from _SYSTEM_LOG_ANALYST_TEMPLATE at seed time so the
+        # prompt points at this OS's log tooling (journalctl/systemctl on
+        # Linux, log show/launchctl on macOS). The sentinel is replaced
+        # inside seed_defaults() below.
+        "system_prompt": "__RENDER_SYSTEM_LOG_ANALYST__",
         "description": "Analyzes system journal entries — flags errors, auth issues, service failures",
         "capabilities": ["syslog", "security", "analysis"],
     },
@@ -215,10 +251,14 @@ async def seed_defaults(
 
     logger.info("Seeding default agents and routing rules ...")
 
-    # Create agents and build name→id map
+    # Create agents and build name→id map. Templated prompts are
+    # rendered here so the live OS facts make it into the DB row.
     name_to_id: dict[str, str] = {}
     for agent_def in _DEFAULT_AGENTS:
-        agent = await agent_repo.create(AgentCreate(**agent_def))
+        resolved = dict(agent_def)
+        if resolved.get("system_prompt") == "__RENDER_SYSTEM_LOG_ANALYST__":
+            resolved["system_prompt"] = _render_system_log_analyst_prompt()
+        agent = await agent_repo.create(AgentCreate(**resolved))
         name_to_id[agent_def["name"]] = agent.id
         logger.info("  Created agent: %s (%s)", agent.name, agent.id)
 

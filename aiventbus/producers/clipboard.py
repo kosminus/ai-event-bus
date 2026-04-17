@@ -1,7 +1,10 @@
 """Clipboard monitor producer — watches for clipboard changes.
 
-Uses xclip polling via XWayland (works on both Wayland and X11, no flicker).
-Falls back to wl-paste if xclip is unavailable on Wayland.
+Resolves the OS-specific read backend (pbpaste / xclip / wl-paste) via
+``aiventbus.platform.clipboard_backend``. ``start()`` is honest: if the
+platform layer reports no backend, the producer stays not-running and the
+manager reflects that in the API, so we never show a producer as running
+while silently emitting nothing.
 """
 
 from __future__ import annotations
@@ -9,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import shutil
 
+from aiventbus import platform as _platform
 from aiventbus.core.bus import EventBus
 from aiventbus.models import EventCreate, Priority
+from aiventbus.platform import ClipboardBackend
 from aiventbus.producers.base import BaseProducer
 
 logger = logging.getLogger(__name__)
@@ -33,23 +37,24 @@ class ClipboardProducer(BaseProducer):
         self._last_hash: str | None = None
         self._task: asyncio.Task | None = None
         self._running = False
+        self._backend: ClipboardBackend | None = None
 
     async def start(self) -> None:
+        backend = _platform.clipboard_backend()
+        if backend is None:
+            # Capability-layer guards upstream in ProducerManager should
+            # prevent this, but be defensive: don't claim to be running if
+            # we have no way to poll.
+            logger.warning("No clipboard backend available — producer not started")
+            return
+        self._backend = backend
         self._running = True
-        if shutil.which("xclip"):
-            self._task = asyncio.create_task(self._poll_loop_xclip())
-            logger.info(
-                "Clipboard producer started (xclip, interval=%dms)",
-                int(self.poll_interval_s * 1000),
-            )
-        elif shutil.which("wl-paste"):
-            self._task = asyncio.create_task(self._poll_loop_wlpaste())
-            logger.info(
-                "Clipboard producer started (wl-paste polling, interval=%dms)",
-                int(self.poll_interval_s * 1000),
-            )
-        else:
-            logger.warning("No clipboard tool found — install xclip or wl-clipboard")
+        self._task = asyncio.create_task(self._poll_loop())
+        logger.info(
+            "Clipboard producer started (%s, interval=%dms)",
+            backend.backend,
+            int(self.poll_interval_s * 1000),
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -104,28 +109,13 @@ class ClipboardProducer(BaseProducer):
             pass
         return None
 
-    async def _poll_loop_xclip(self) -> None:
-        """Poll clipboard via xclip (works on X11 and Wayland via XWayland)."""
+    async def _poll_loop(self) -> None:
+        """Poll the clipboard using the resolved backend's read command."""
+        assert self._backend is not None
+        cmd = self._backend.read_command()
         while self._running:
             try:
-                content = await self._read_clipboard(
-                    "xclip", "-selection", "clipboard", "-o"
-                )
-                if content:
-                    await self._publish_content(content)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.debug("Clipboard read error: %s", e)
-            await asyncio.sleep(self.poll_interval_s)
-
-    async def _poll_loop_wlpaste(self) -> None:
-        """Poll clipboard via wl-paste (Wayland fallback)."""
-        while self._running:
-            try:
-                content = await self._read_clipboard(
-                    "wl-paste", "--no-newline", "--type", "text/plain"
-                )
+                content = await self._read_clipboard(*cmd)
                 if content:
                     await self._publish_content(content)
             except asyncio.CancelledError:

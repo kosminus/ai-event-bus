@@ -8,7 +8,18 @@ ollama:
   request_timeout: 120
 
 database:
-  path: "./aiventbus.db"
+  # Resolution order (first match wins):
+  #   1. --db <path> CLI flag
+  #   2. $AIVENTBUS_DB env var
+  #   3. this `path` value if set explicitly
+  #   4. --dev / $AIVENTBUS_DEV=1 + ./aiventbus.db in the current directory
+  #   5. platform default — ~/.local/share/aiventbus/aiventbus.db (Linux) or
+  #      ~/Library/Application Support/aiventbus/aiventbus.db (macOS)
+  #
+  # Leave commented out to use the platform default. Uncomment and set an
+  # absolute path to pin the DB location regardless of how the daemon is
+  # launched.
+  # path: "/var/lib/aiventbus/aiventbus.db"
 
 bus:
   dedupe_window_seconds: 60
