@@ -82,10 +82,16 @@ class ProducersConfig:
     dbus_enabled: bool = False
     terminal_monitor_enabled: bool = False
     terminal_history_path: str | None = None
+    # journald_* controls the unified system_log producer. Kept under the
+    # journald prefix for config compatibility; on macOS the same knobs
+    # drive the `log stream` backend.
     journald_enabled: bool = False
     journald_filter_noise: bool = True
     journald_priority_filter: int = 4  # 4=warning+, 3=error+, 7=all (auth always passes)
-    journald_units: list = field(default_factory=list)  # e.g. ["sshd", "docker"]
+    journald_units: list = field(default_factory=list)  # journald-only: `-u <unit>`
+    # Optional override for the macOS `log stream` predicate. Leave None
+    # to use the sensible default (errors/faults + auth subsystems).
+    log_stream_predicate: str | None = None
     webhook_enabled: bool = False
     webhook_secret: str | None = None  # Bearer token / HMAC secret (None = no auth)
     webhook_default_priority: str = "medium"

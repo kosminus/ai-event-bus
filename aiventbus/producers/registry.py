@@ -124,26 +124,27 @@ def _build_cron(bus: EventBus, cfg: AppConfig) -> BaseProducer | None:
 
 
 def _build_system_log(bus: EventBus, cfg: AppConfig) -> BaseProducer | None:
-    """System log producer (journald on Linux, log stream on macOS).
+    """System-log producer: journald on Linux, `log stream` on macOS.
 
-    Until PR 4 lands the unified ``system_log`` package, we keep the
-    existing journald implementation as the Linux backend and return
-    ``None`` on other OSes so the registry marks the producer unavailable.
+    Both backends live behind one ``SystemLogProducer`` so downstream
+    topics and payloads are identical. If this OS has no backend wired
+    up, ``build_default_backend`` returns ``None`` and the registry
+    reports the producer unavailable via its capability status.
     """
-    if _platform.IS_LINUX:
-        from aiventbus.producers.journald import JournaldProducer
+    from aiventbus.producers.system_log import SystemLogProducer, build_default_backend
 
-        return JournaldProducer(
-            bus=bus,
-            filter_noise=cfg.producers.journald_filter_noise,
-            priority_filter=cfg.producers.journald_priority_filter,
-            units=cfg.producers.journald_units,
-        )
-    # macOS backend is introduced in PR 4. Until then, producing no instance
-    # is the right thing to do — ProducerManager will report this producer
-    # as unavailable with the system_log capability's reason from the
-    # platform layer.
-    return None
+    backend = build_default_backend(
+        filter_noise=cfg.producers.journald_filter_noise,
+        units=cfg.producers.journald_units,
+        predicate_override=cfg.producers.log_stream_predicate,
+    )
+    if backend is None:
+        return None
+    return SystemLogProducer(
+        bus=bus,
+        backend=backend,
+        priority_filter=cfg.producers.journald_priority_filter,
+    )
 
 
 def _build_desktop_events(bus: EventBus, cfg: AppConfig) -> BaseProducer | None:
@@ -219,11 +220,8 @@ REGISTRY: list[ProducerSpec] = [
         required_capabilities=[Capability.SYSTEM_LOG],
         factory=_build_system_log,
         is_enabled=lambda cfg: cfg.producers.journald_enabled,
-        # PR 4 adds the macOS log_stream backend. Until then the spec is
-        # honestly Linux-only, even though the SYSTEM_LOG capability reports
-        # available on macOS (the `log` binary exists; nothing in this
-        # codebase consumes it yet).
-        supported_platforms={"linux"},
+        # Linux and macOS both have backends now (journald / log stream).
+        supported_platforms={"linux", "darwin"},
     ),
     ProducerSpec(
         name="desktop_events",
