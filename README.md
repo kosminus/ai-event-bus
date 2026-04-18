@@ -387,7 +387,48 @@ policy:
 lanes:
   interactive_prefixes: ["user."]
   critical_prefixes: ["security.", "system.failure"]
+
+telemetry:
+  queue_depth_sample_interval_seconds: 5.0
 ```
+
+## Observability
+
+Prometheus metrics are always exposed at `http://localhost:8420/metrics`
+(plaintext, OpenMetrics-compatible). Scrape with any Prometheus-compatible
+collector.
+
+Metric families:
+
+| Family | Type | Labels | What it measures |
+|---|---|---|---|
+| `aiventbus_http_requests_total` | counter | `method`, `path`, `status` | HTTP traffic against the daemon |
+| `aiventbus_http_request_duration_seconds` | histogram | `method`, `path` | HTTP request latency |
+| `aiventbus_events_published_total` | counter | `topic`, `source` | Events accepted onto the bus |
+| `aiventbus_events_deduped_total` | counter | `topic` | Events dropped by the dedupe window |
+| `aiventbus_events_chain_limit_total` | counter | `reason` (`depth`\|`budget`) | Chain-reaction guardrail rejections |
+| `aiventbus_event_publish_duration_seconds` | histogram | `outcome` | Latency of `EventBus.publish` |
+| `aiventbus_routing_decisions_total` | counter | `result` | Matched / unmatched routing outcomes |
+| `aiventbus_routing_duration_seconds` | histogram | `result` | Latency of routing decisions |
+| `aiventbus_assignments_created_total` | counter | `agent_id`, `lane` | Assignments handed to agents |
+| `aiventbus_assignment_state_transitions_total` | counter | `agent_id`, `state` | `claimed` / `completed` / `failed` / `retried` |
+| `aiventbus_assignment_queue_depth` | gauge | `lane` | Pending assignments per priority lane |
+| `aiventbus_agent_runs_total` | counter | `agent_id`, `model`, `result` | Assignment processing outcomes |
+| `aiventbus_agent_run_duration_seconds` | histogram | `agent_id`, `model`, `result` | Latency of one assignment run |
+| `aiventbus_llm_requests_total` | counter | `agent_id`, `model`, `result` | Ollama completion calls |
+| `aiventbus_llm_request_duration_seconds` | histogram | `agent_id`, `model` | LLM wall time |
+| `aiventbus_llm_parse_failures_total` | counter | `agent_id`, `model` | Unparseable structured output |
+| `aiventbus_llm_tokens_total` | counter | `agent_id`, `model`, `kind` (`prompt`\|`eval`) | Tokens reported by Ollama |
+| `aiventbus_action_executions_total` | counter | `agent_id`, `action_type`, `result` | Executor outcomes |
+| `aiventbus_action_execution_duration_seconds` | histogram | `action_type`, `result` | Executor wall time |
+| `aiventbus_producer_events_emitted_total` | counter | `producer` | Per-producer emit rate |
+| `aiventbus_system_events_total` | counter | `topic` | Internal `system.*` events (parse_failure, agent_failure, chain_limit, ...) |
+| `aiventbus_classifier_fallbacks_total` | counter | `result` | Classifier invocations for unmatched events |
+
+Queue depth is sampled in the background (default 5s, tunable via
+`telemetry.queue_depth_sample_interval_seconds`) so scrapes don't hit
+the DB. The `/metrics` endpoint is always on — gate it at the network
+layer (firewall / reverse proxy) if you don't want it exposed.
 
 ## API reference
 
@@ -417,6 +458,7 @@ lanes:
 | `GET` | `/api/v1/knowledge/:key` | Get knowledge entry |
 | `GET` | `/api/v1/topics` | Topic stats |
 | `GET` | `/api/v1/system/status` | Health check |
+| `GET` | `/metrics` | Prometheus metrics (plaintext exposition) |
 | `WS` | `/ws` | WebSocket (real-time events + agent streaming) |
 
 ## License

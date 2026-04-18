@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Callable, Coroutine
 
 from uuid import uuid4
@@ -17,6 +18,14 @@ from aiventbus.models import Event, EventCreate, EventStatus
 from aiventbus.storage.repositories import (
     AssignmentRepository,
     EventRepository,
+)
+from aiventbus.telemetry import (
+    EVENT_PUBLISH_DURATION_SECONDS,
+    record_chain_limit,
+    record_event_deduped,
+    record_event_published,
+    record_producer_emit,
+    record_system_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,6 +102,13 @@ class EventBus:
 
     async def publish(self, event_create: EventCreate, producer_id: str | None = None) -> Event:
         """Main entry point. Ingest → dedupe → persist → route → broadcast."""
+        start = time.monotonic()
+
+        def _observe(outcome: str) -> None:
+            EVENT_PUBLISH_DURATION_SECONDS.labels(outcome=outcome).observe(
+                time.monotonic() - start
+            )
+
         # Resolve trace_id: inherit from parent, or use provided, or generate new
         trace_id = event_create.trace_id
         if not trace_id and event_create.parent_event:
@@ -132,12 +148,14 @@ class EventBus:
                     "Deduped event %s (key=%s, count=%d)",
                     event.id, event.dedupe_key, count,
                 )
+                record_event_deduped(event.topic)
                 # Persist as deduped but don't route
                 await self.event_repo.create(event)
                 await self.ws_hub.broadcast(
                     f"events:{event.topic}", "event.deduped",
                     {"event_id": event.id, "original_id": existing.id, "count": count},
                 )
+                _observe("deduped")
                 return event
 
         # Chain depth check
@@ -147,6 +165,7 @@ class EventBus:
                 logger.warning(
                     "Chain depth limit reached for event %s (depth=%d)", event.id, depth
                 )
+                record_chain_limit("depth")
                 event.status = EventStatus.failed
                 await self.event_repo.create(event)
                 # Emit to system.chain_limit
@@ -155,6 +174,7 @@ class EventBus:
                     "parent_event": event.parent_event,
                     "depth": depth,
                 })
+                _observe("chain_depth_limited")
                 return event
 
             # Chain budget check
@@ -164,6 +184,7 @@ class EventBus:
                 logger.warning(
                     "Chain budget exceeded for root %s (descendants=%d)", root_event, descendants
                 )
+                record_chain_limit("budget")
                 event.status = EventStatus.failed
                 await self.event_repo.create(event)
                 await self._emit_system_event("system.chain_limit", {
@@ -171,10 +192,14 @@ class EventBus:
                     "root_event": root_event,
                     "descendants": descendants,
                 })
+                _observe("chain_budget_limited")
                 return event
 
         # Persist
         await self.event_repo.create(event)
+        record_event_published(event.topic, event.source or producer_id)
+        if producer_id:
+            record_producer_emit(producer_id)
         logger.info("Published event %s on topic %s", event.id, event.topic)
 
         # Broadcast to WebSocket
@@ -194,6 +219,7 @@ class EventBus:
             except Exception as e:
                 logger.error("Listener error: %s", e)
 
+        _observe("published")
         return event
 
     async def _route_event(self, event: Event) -> None:
@@ -220,6 +246,7 @@ class EventBus:
             priority="high",
             source="system",
         )
+        record_system_event(topic)
         await self.event_repo.create(event)
         await self.ws_hub.broadcast(
             f"events:{topic}", "event.new",

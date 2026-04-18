@@ -60,6 +60,7 @@ aiventbus/
 ├── config.py                # YAML config loader
 ├── models.py                # Pydantic models (tiered event schema)
 ├── cli.py                   # CLI interface (aibus command)
+├── telemetry.py             # Prometheus metrics + /metrics exposition + HTTP middleware
 ├── core/
 │   ├── bus.py               # EventBus: publish, dedupe, dispatch, WebSocket hub
 │   ├── assignments.py       # Pull-based routing + assignment creation + priority lanes
@@ -177,6 +178,7 @@ Key endpoints:
 - `DELETE /api/v1/cron/jobs/:name` — remove a cron job
 - `GET /api/v1/system/status` — health check
 - `GET /api/v1/topics` — topic stats
+- `GET /metrics` — Prometheus exposition (plaintext). Mounted at the root, not under `/api/v1/`
 - `ws://localhost:8420/ws` — WebSocket (channels: `events:*`, `agents:*`, `system`)
 
 ## Producers
@@ -277,6 +279,11 @@ Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only ru
 - Default agents and routing rules seeder (8 agents, 9 routes on first run)
 - SQLite persistence (10 tables) with migrations
 - Lifecycle manager (expiry, retry)
+- Prometheus telemetry at `GET /metrics` — event/routing/assignment/LLM/executor counters + histograms, queue-depth gauge by lane, LLM token counts, producer emits, `system.*` event counts, classifier fallbacks, HTTP request metrics
+
+## Observability
+
+Prometheus exposition at `GET /metrics` (always on — gate at the network layer). Core module is `aiventbus/telemetry.py`; record helpers (`record_event_published`, `record_assignment_state`, `record_llm_tokens`, `set_queue_depth`, etc.) are called inline from the natural instrumentation points (bus publish, routing, llm_agent loop, executor, classifier, lifecycle retry). Queue depth is sampled in a background task from `assignment_repo.count_pending_by_lane()` — interval set by `telemetry.queue_depth_sample_interval_seconds` (default 5s). The `/metrics` route and HTTP middleware are mounted unconditionally in `create_app()` — do not gate them on `load_config()` at import time, since CLI flags aren't applied until later.
 
 ## Development notes
 

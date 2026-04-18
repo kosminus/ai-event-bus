@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -18,6 +19,7 @@ import httpx
 
 from aiventbus import platform as _platform
 from aiventbus.core.tools import ToolRegistry
+from aiventbus.telemetry import record_action_execution
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +42,20 @@ class Executor:
         self._handlers[action_type] = handler
 
     async def execute(self, action_type: str, action_data: dict) -> dict[str, Any]:
+        start = time.monotonic()
+        agent_id = str(action_data.get("_telemetry_agent_id") or "unknown")
         handler = self._handlers.get(action_type)
         if not handler:
+            record_action_execution(agent_id, action_type, "unknown_handler", time.monotonic() - start)
             return {"error": f"No handler for action type: {action_type}"}
         try:
-            return await handler(action_data)
+            result = await handler(action_data)
+            outcome = "error" if isinstance(result, dict) and result.get("error") else "completed"
+            record_action_execution(agent_id, action_type, outcome, time.monotonic() - start)
+            return result
         except Exception as e:
             logger.error("Executor error for %s: %s", action_type, e)
+            record_action_execution(agent_id, action_type, "failed", time.monotonic() - start)
             return {"error": str(e)}
 
     def has_handler(self, action_type: str) -> bool:

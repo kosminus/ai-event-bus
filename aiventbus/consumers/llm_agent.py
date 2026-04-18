@@ -52,6 +52,14 @@ from aiventbus.storage.repositories import (
     PendingActionRepository,
     ResponseRepository,
 )
+from aiventbus.telemetry import (
+    record_action_execution,
+    record_agent_run,
+    record_assignment_state,
+    record_llm_parse_failure,
+    record_llm_request,
+    record_llm_tokens,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +157,7 @@ class LLMAgentConsumer(BaseConsumer):
                     if not assignment:
                         self._semaphore.release()
                         break
+                    record_assignment_state(self.agent.id, "claimed")
                     asyncio.create_task(self._process_with_semaphore(assignment))
             except asyncio.CancelledError:
                 break
@@ -164,10 +173,12 @@ class LLMAgentConsumer(BaseConsumer):
 
     async def _process_assignment(self, assignment) -> None:
         """Run the tool-use loop for an assignment (fresh or resumed)."""
+        started_at = time.monotonic()
         event = await self.event_repo.get(assignment.event_id)
         if not event:
             logger.error("Event %s not found for assignment %s", assignment.event_id, assignment.id)
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.failed, "Event not found")
+            record_assignment_state(self.agent.id, "failed")
             return
 
         await self.assignment_repo.update_status(assignment.id, AssignmentStatus.running)
@@ -184,6 +195,7 @@ class LLMAgentConsumer(BaseConsumer):
         scope = event.memory_scope or self.agent.memory_scope or self.agent.id
         max_iters = int(self.agent.config.get("max_tool_iterations", DEFAULT_MAX_ITERATIONS))
         model = self._resolve_model(assignment)
+        run_result = "failed"
 
         try:
             # On fresh start, persist user turn to memory
@@ -208,12 +220,19 @@ class LLMAgentConsumer(BaseConsumer):
                 if not state.get("remaining_actions") and not state.get("last_assistant_json"):
                     # Fresh iteration — call the LLM
                     start = time.monotonic()
-                    raw = await self._stream_ollama(model, state["messages"], event)
-                    duration_ms = int((time.monotonic() - start) * 1000)
+                    try:
+                        raw = await self._stream_ollama(model, state["messages"], event)
+                    except Exception:
+                        record_llm_request(self.agent.id, model, 0.0, "failed")
+                        raise
+                    llm_duration = time.monotonic() - start
+                    duration_ms = int(llm_duration * 1000)
+                    record_llm_request(self.agent.id, model, llm_duration, "success")
                     parsed = self.output_parser.parse(raw)
                     await self._persist_agent_response(assignment, event, raw, parsed, model, duration_ms)
 
                     if parsed is None:
+                        record_llm_parse_failure(self.agent.id, model)
                         await self.bus._emit_system_event("system.parse_failure", {
                             "agent_id": self.agent.id,
                             "event_id": event.id,
@@ -253,6 +272,7 @@ class LLMAgentConsumer(BaseConsumer):
                 suspended = await self._execute_batch(assignment, event, state, iteration)
                 if suspended:
                     # _execute_batch has persisted state and returned — assignment is now waiting
+                    run_result = "waiting_confirmation"
                     return
 
                 # Batch complete — fold assistant + action results back into messages
@@ -276,6 +296,7 @@ class LLMAgentConsumer(BaseConsumer):
                 ))
 
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.completed)
+            record_assignment_state(self.agent.id, "completed")
             await self.bus.update_event_status(event.id, EventStatus.completed)
             await self.ws_hub.broadcast(
                 f"agents:{self.agent.id}", "agent.response",
@@ -286,10 +307,12 @@ class LLMAgentConsumer(BaseConsumer):
                 },
             )
             logger.info("Agent %s completed event %s (iterations=%d)", self.agent.id, event.id, iteration)
+            run_result = "completed"
 
         except Exception as e:
             logger.error("Agent %s failed on event %s: %s", self.agent.id, event.id, e)
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.failed, str(e))
+            record_assignment_state(self.agent.id, "failed")
             await self.bus.update_event_status(event.id, EventStatus.failed)
             await self.bus._emit_system_event("system.agent_failure", {
                 "agent_id": self.agent.id,
@@ -297,6 +320,7 @@ class LLMAgentConsumer(BaseConsumer):
                 "error": str(e),
             })
         finally:
+            record_agent_run(self.agent.id, model, run_result, time.monotonic() - started_at)
             pending = await self.assignment_repo.get_pending_count(self.agent.id)
             if pending == 0:
                 await self.agent_repo.update_status(self.agent.id, AgentStatus.idle.value)
@@ -345,11 +369,19 @@ class LLMAgentConsumer(BaseConsumer):
 
     async def _stream_ollama(self, model: str, messages: list[dict], event) -> str:
         chunks: list[str] = []
-        async for chunk in self.ollama.chat(model, messages):
+        stats: dict = {}
+        async for chunk in self.ollama.chat(model, messages, stats_out=stats):
             chunks.append(chunk)
             await self.ws_hub.broadcast(
                 f"agents:{self.agent.id}", "agent.stream",
                 {"agent_id": self.agent.id, "event_id": event.id, "token": chunk},
+            )
+        if stats:
+            record_llm_tokens(
+                self.agent.id,
+                model,
+                stats.get("prompt_eval_count", 0),
+                stats.get("eval_count", 0),
             )
         return "".join(chunks)
 
@@ -454,6 +486,15 @@ class LLMAgentConsumer(BaseConsumer):
         into the conversation as the result of this action.
         """
         action_type = action.get("action_type")
+        started_at = time.monotonic()
+
+        def _record(result: str) -> None:
+            record_action_execution(
+                self.agent.id,
+                str(action_type or "unknown"),
+                result,
+                time.monotonic() - started_at,
+            )
 
         # Some models wrap parameters in a nested "params" dict instead of
         # flattening them at the top level. Normalize both shapes so handlers
@@ -473,6 +514,7 @@ class LLMAgentConsumer(BaseConsumer):
                 "action_type": action_type,
                 "reason": reason,
             })
+            _record("denied")
             return ActionOutcome(kind="denied", action=action, reason=reason)
 
         # Built-in bus actions
@@ -480,6 +522,7 @@ class LLMAgentConsumer(BaseConsumer):
             topic = action.get("topic") or source_event.output_topic
             if not topic:
                 logger.warning("emit_event action has no topic, skipping")
+                _record("denied")
                 return ActionOutcome(kind="denied", action=action, reason="emit_event missing topic")
             payload = action.get("payload", {})
             published = await self.bus.publish(EventCreate(
@@ -488,11 +531,13 @@ class LLMAgentConsumer(BaseConsumer):
                 memory_scope=source_event.memory_scope,
                 source=f"agent:{self.agent.id}",
             ))
+            _record("executed")
             return ActionOutcome(kind="executed", action=action, result={"emitted_event_id": getattr(published, "id", None), "topic": topic})
 
         if action_type == "log":
             message = action.get("message", "")
             logger.info("Agent %s log: %s", self.agent.id, message)
+            _record("executed")
             return ActionOutcome(kind="executed", action=action, result={"logged": message})
 
         if action_type == "alert":
@@ -500,10 +545,12 @@ class LLMAgentConsumer(BaseConsumer):
             logger.warning("Agent %s ALERT: %s", self.agent.id, message)
             await self.ws_hub.broadcast("system", "system.alert",
                 {"agent_id": self.agent.id, "message": message})
+            _record("executed")
             return ActionOutcome(kind="executed", action=action, result={"alerted": message})
 
         if not self.policy_engine or not self.executor:
             logger.warning("Agent %s proposed %s but policy/executor not configured", self.agent.id, action_type)
+            _record("unknown")
             return ActionOutcome(kind="unknown", action=action, reason="policy/executor not configured")
 
         if not self.executor.has_handler(action_type):
@@ -518,6 +565,7 @@ class LLMAgentConsumer(BaseConsumer):
                 "event_id": source_event.id,
                 "action_type": action_type,
             })
+            _record("unknown")
             return ActionOutcome(kind="unknown", action=action, reason=f"no handler for {action_type}")
 
         decision = self.policy_engine.evaluate(action_type, action)
@@ -529,10 +577,14 @@ class LLMAgentConsumer(BaseConsumer):
                 "action_type": action_type,
                 "reason": decision.reason,
             })
+            _record("denied")
             return ActionOutcome(kind="denied", action=action, reason=decision.reason)
 
         if decision.trust_mode == TrustMode.auto:
-            result = await self.executor.execute(action_type, action)
+            result = await self.executor.execute(
+                action_type,
+                {**action, "_telemetry_agent_id": self.agent.id},
+            )
             if self.action_repo:
                 auto = PendingAction(
                     assignment_id=assignment.id,
@@ -557,6 +609,7 @@ class LLMAgentConsumer(BaseConsumer):
 
         # confirm — queue pending action, signal suspend
         if not self.action_repo:
+            _record("denied")
             return ActionOutcome(kind="denied", action=action, reason="confirmation required but action_repo not configured")
 
         pending = PendingAction(
@@ -576,4 +629,5 @@ class LLMAgentConsumer(BaseConsumer):
             "action_type": action_type,
             "action_data": action,
         })
+        _record("waiting_confirmation")
         return ActionOutcome(kind="waiting", action=action, action_id=pending.id)

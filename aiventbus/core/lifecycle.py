@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 
 from aiventbus.storage.db import Database
+from aiventbus.telemetry import record_assignment_state
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class LifecycleManager:
                         "UPDATE event_assignments SET status = 'pending', retry_count = ? WHERE id = ?",
                         (new_count, row["id"]),
                     )
+                    record_assignment_state(row["agent_id"], "retried")
                     logger.info(
                         "Retrying assignment %s (attempt %d/%d)",
                         row["id"], new_count, row["max_retries"],
