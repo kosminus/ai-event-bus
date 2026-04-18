@@ -74,8 +74,10 @@ class LoggingConfig:
 
 @dataclass
 class TelemetryConfig:
-    enabled: bool = True
-    path: str = "/metrics"
+    # ``/metrics`` and the HTTP-metrics middleware are always mounted —
+    # gating them via config is unsafe because ``create_app`` runs at
+    # import time, before the CLI flags that select the config file
+    # take effect. Disable via firewall / reverse proxy instead.
     queue_depth_sample_interval_seconds: float = 5.0
 
 

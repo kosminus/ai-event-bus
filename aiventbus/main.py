@@ -284,21 +284,19 @@ async def lifespan(app: FastAPI):
     # Queue-depth gauge sampler (Prometheus scraper reads the gauge; we keep
     # it fresh with a slow background tick to avoid a DB hit per scrape).
     global _queue_depth_task
-    _queue_depth_task = None
-    if _config.telemetry.enabled:
-        interval = _config.telemetry.queue_depth_sample_interval_seconds
+    interval = _config.telemetry.queue_depth_sample_interval_seconds
 
-        async def _sample_queue_depth() -> None:
-            while True:
-                try:
-                    counts = await assignment_repo.count_pending_by_lane()
-                    for lane, depth in counts.items():
-                        set_queue_depth(lane, depth)
-                except Exception as e:
-                    logger.debug("queue-depth sampler error: %s", e)
-                await asyncio.sleep(interval)
+    async def _sample_queue_depth() -> None:
+        while True:
+            try:
+                counts = await assignment_repo.count_pending_by_lane()
+                for lane, depth in counts.items():
+                    set_queue_depth(lane, depth)
+            except Exception as e:
+                logger.debug("queue-depth sampler error: %s", e)
+            await asyncio.sleep(interval)
 
-        _queue_depth_task = asyncio.create_task(_sample_queue_depth())
+    _queue_depth_task = asyncio.create_task(_sample_queue_depth())
 
     # Initialize agent manager
     _agent_manager = AgentManager(
@@ -352,12 +350,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    if _queue_depth_task:
-        _queue_depth_task.cancel()
-        try:
-            await _queue_depth_task
-        except asyncio.CancelledError:
-            pass
+    _queue_depth_task.cancel()
+    try:
+        await _queue_depth_task
+    except asyncio.CancelledError:
+        pass
     await _producer_manager.stop_all()
     await _lifecycle.stop()
     await _agent_manager.stop_all()
@@ -376,9 +373,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
-    telemetry_cfg = load_config().telemetry
-    if telemetry_cfg.enabled:
-        app.middleware("http")(http_metrics_middleware)
+    app.middleware("http")(http_metrics_middleware)
 
     # CORS
     app.add_middleware(
@@ -403,14 +398,13 @@ def create_app() -> FastAPI:
     app.include_router(producers.router)
     app.include_router(webhook.router)
     app.include_router(cron.router)
-    if telemetry_cfg.enabled:
-        app.add_api_route(
-            telemetry_cfg.path,
-            lambda: metrics_response(),
-            methods=["GET"],
-            include_in_schema=False,
-            response_class=Response,
-        )
+    app.add_api_route(
+        "/metrics",
+        lambda: metrics_response(),
+        methods=["GET"],
+        include_in_schema=False,
+        response_class=Response,
+    )
 
     # Static files (Web UI)
     static_dir = Path(__file__).parent / "static"
