@@ -68,6 +68,22 @@ aibus install --build-helper  # macOS only: also build + install the Swift sidec
 
 Both forms generate the service unit from the live `sys.executable` + resolved config/DB/log paths, so a daemon launched by systemd or launchd uses the same state as a CLI run from the repo. `aibus uninstall` removes it; `aibus uninstall --purge` also deletes the data/config/log dirs.
 
+### Debian package for the daemon
+
+For Ubuntu/Debian distribution, build a self-contained `.deb` that bundles a PyInstaller-frozen runtime. No `pip install`, no virtualenv, no system Python required on the target — the only runtime dependency is `libc6`.
+
+```bash
+pip install pyinstaller          # maintainer-only dev dependency
+aibus package-binary             # build dist/aiventbus-bundle/ (PyInstaller onedir)
+aibus package-deb                # package the bundle as dist/aiventbus-daemon_<version>_<arch>.deb
+```
+
+`aibus package-deb` will invoke PyInstaller itself if no bundle exists; pass `--reuse-bundle` to skip the rebuild. The resulting package installs the bundle under `/opt/aiventbus/` and symlinks `/usr/bin/aiventbus` and `/usr/bin/aibus` to a single dispatcher binary.
+
+After installing the `.deb`, each user who wants the daemon running in their session should still run `aibus install` to create and enable their per-user systemd unit.
+
+**Build caveat:** PyInstaller bundles are tied to the builder's architecture, glibc version, and Python version. Build in a clean container that matches your target distro (e.g. `ubuntu:22.04` for maximum compatibility with 22.04+).
+
 Open [http://localhost:8420](http://localhost:8420) for the dashboard. The web UI now includes a **Memories** tab for searching and deleting distilled long-term memory. API docs at [http://localhost:8420/docs](http://localhost:8420/docs).
 
 ## CLI

@@ -537,6 +537,74 @@ def restart_cmd():
     click.echo(msg)
 
 
+@cli.command("package-binary")
+@click.option("--output-dir", default="dist", show_default=True,
+              help="Where the PyInstaller bundle directory will be written.")
+@click.option("--work-dir", default="build", show_default=True,
+              help="PyInstaller work/cache directory.")
+@click.option("--no-clean", is_flag=True,
+              help="Skip PyInstaller --clean (reuse previous analysis cache).")
+def package_binary_cmd(output_dir: str, work_dir: str, no_clean: bool):
+    """Build a self-contained PyInstaller bundle for the daemon + CLI."""
+    from aiventbus.packaging.pyinstaller_build import build_bundle
+
+    try:
+        result = build_bundle(
+            output_dir=output_dir,
+            work_dir=work_dir,
+            clean=not no_clean,
+        )
+    except Exception as e:
+        click.echo(f"Binary build failed: {e}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Built bundle: {result.bundle_dir}")
+    click.echo(f"Launcher:     {result.launcher_path}")
+
+
+@cli.command("package-deb")
+@click.option("--output-dir", default="dist", show_default=True,
+              help="Directory where the built .deb will be written.")
+@click.option("--maintainer", default="aiventbus maintainers <maintainers@aiventbus.local>",
+              show_default=True, help="Maintainer field for the Debian control file.")
+@click.option("--package-name", default="aiventbus-daemon", show_default=True,
+              help="Debian package name.")
+@click.option("--revision", default="1", show_default=True,
+              help="Debian revision suffix appended to the app version.")
+@click.option("--architecture", default=None,
+              help="Override Debian architecture (defaults to dpkg --print-architecture).")
+@click.option("--keep-staging", is_flag=True,
+              help="Keep the temporary staging directory instead of deleting it.")
+@click.option("--reuse-bundle", is_flag=True,
+              help="Reuse an existing PyInstaller bundle in the output dir instead of rebuilding it.")
+def package_deb_cmd(output_dir: str, maintainer: str, package_name: str,
+                    revision: str, architecture: str | None,
+                    keep_staging: bool, reuse_bundle: bool):
+    """Build a .deb that bundles the PyInstaller daemon under /opt/aiventbus."""
+    from aiventbus.packaging.deb import build_deb
+
+    try:
+        result = build_deb(
+            output_dir=output_dir,
+            maintainer=maintainer,
+            package_name=package_name,
+            revision=revision,
+            architecture=architecture,
+            keep_staging=keep_staging,
+            build_if_missing=not reuse_bundle,
+        )
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2)
+    except Exception as e:
+        click.echo(f"Deb build failed: {e}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Built Debian package: {result.deb_path}")
+    if keep_staging and result.staging_dir:
+        click.echo(f"Staging directory kept at: {result.staging_dir}")
+
+
 def main():
     cli(obj={})
 
