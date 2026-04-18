@@ -164,6 +164,37 @@ Uses a lightweight model to classify unmatched events. Returns `route_to` (agent
 
 The agent worker. Runs as an asyncio task per agent. Pull-based: claims assignments via atomic SQL UPDATE. Concurrency controlled by semaphore (agent.max_concurrent).
 
+### Telemetry (`telemetry.py`)
+
+Owns every Prometheus metric and the `/metrics` exposition endpoint. No wrappers or decorators — business code imports record helpers and calls them inline at instrumentation points.
+
+Metric families and where they're produced:
+
+| Metric | Produced in |
+|---|---|
+| `aiventbus_http_requests_total`, `..._duration_seconds` | `http_metrics_middleware` (registered on the ASGI app) |
+| `aiventbus_events_published_total`, `..._deduped_total`, `..._chain_limit_total`, `event_publish_duration_seconds` | `core/bus.py` — inside `publish()` |
+| `aiventbus_system_events_total` | `core/bus.py` — inside `_emit_system_event` |
+| `aiventbus_routing_decisions_total`, `..._duration_seconds`, `assignments_created_total` | `core/assignments.py` |
+| `aiventbus_classifier_fallbacks_total` | `ai/classifier.py` — `classify()` return sites |
+| `aiventbus_assignment_state_transitions_total` | `consumers/llm_agent.py` (claim/complete/fail) and `core/lifecycle.py` (retry) |
+| `aiventbus_assignment_queue_depth` | Background sampler in `main.lifespan` — calls `assignment_repo.count_pending_by_lane()` every `telemetry.queue_depth_sample_interval_seconds` and calls `set_queue_depth(lane, n)` |
+| `aiventbus_agent_runs_total`, `..._duration_seconds`, `llm_requests_total`, `..._duration_seconds`, `llm_parse_failures_total` | `consumers/llm_agent.py` |
+| `aiventbus_llm_tokens_total` | `consumers/llm_agent.py._stream_ollama` — pulls `prompt_eval_count` / `eval_count` via `OllamaClient.chat(stats_out=...)` |
+| `aiventbus_producer_events_emitted_total` | `core/bus.py` — when `publish()` is called with a `producer_id` |
+| `aiventbus_action_executions_total`, `..._duration_seconds` | `core/executor.py` |
+
+The module has a fallback shim so it imports even when `prometheus_client` isn't installed (label cardinality and render format are preserved for tests).
+
+Keep labels low-cardinality: topics are bucketed (`topic_prefix(...)`) where possible; agent IDs and action types are bounded sets; don't pass event IDs, user inputs, or unbounded strings as label values. When you add a new metric:
+
+1. Register the `Counter`/`Histogram`/`Gauge` in `telemetry.py`.
+2. Add a `record_*` / `set_*` helper next to it.
+3. Call it from the instrumentation point directly — don't wrap handlers.
+4. Extend `tests/test_telemetry.py` to assert the metric family appears in the exposition output.
+
+**Gotcha — config timing.** `create_app()` runs at import time, before `cli()` translates `--config` / `--db` / `--dev` into env vars. Do not gate `/metrics` or the HTTP middleware on `load_config()` called from `create_app()` — it sees a different config than `lifespan` will. The endpoint is always mounted at `/metrics`; disable externally (firewall / reverse proxy) if needed. Config-driven knobs (e.g. the queue-depth sampler interval) must be read inside `lifespan`, where the correct config is bound.
+
 ## Adding a new producer
 
 1. Create `producers/my_producer.py`:

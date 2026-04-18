@@ -139,6 +139,29 @@ cargo tauri dev
 
 A compact window appears with a chat input (Ctrl+Space to focus), activity feed, and action approval buttons. It connects to the running daemon via WebSocket.
 
+## Monitor with Prometheus
+
+The daemon always exposes Prometheus metrics at `http://localhost:8420/metrics` (plaintext). Scrape with any collector. A minimal Prometheus job:
+
+```yaml
+scrape_configs:
+  - job_name: aiventbus
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:8420"]
+```
+
+Useful panels / alerts:
+
+- **Event throughput** — `rate(aiventbus_events_published_total[1m])` by `topic`
+- **Routing health** — `rate(aiventbus_routing_decisions_total{result="unmatched"}[5m])`
+- **LLM latency** — `histogram_quantile(0.95, rate(aiventbus_llm_request_duration_seconds_bucket[5m]))`
+- **LLM tokens** — `rate(aiventbus_llm_tokens_total[5m])` by `kind`
+- **Backlog per lane** — `aiventbus_assignment_queue_depth` (gauge)
+- **Failures** — `rate(aiventbus_system_events_total{topic=~"system\\.(agent_failure|parse_failure|chain_limit)"}[5m])`
+
+The endpoint has no auth — gate it at the firewall or a reverse proxy if the daemon isn't behind localhost-only networking.
+
 ## Next steps
 
 - Create specialized agents (security scanner, code reviewer, file organizer)
