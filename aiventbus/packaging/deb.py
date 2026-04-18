@@ -42,6 +42,38 @@ class DebBuildResult:
     staging_dir: Path
 
 
+# ELF e_machine → Debian architecture mapping. Only the values we realistically
+# ship are listed; unknown values become None and the caller surfaces an error.
+_ELF_MACHINE_TO_DEB_ARCH = {
+    0x03: "i386",
+    0x28: "armhf",
+    0x3E: "amd64",
+    0xB7: "arm64",
+    0xF3: "riscv64",
+}
+
+
+def detect_bundle_architecture(launcher_path: Path) -> str | None:
+    """Return the Debian architecture of the given ELF binary, or None.
+
+    Reads e_ident + e_machine from the ELF header. Non-ELF files (e.g. a
+    macOS Mach-O binary produced by an out-of-tree build) return None so the
+    caller can refuse the build with a clear message rather than shipping a
+    mis-stamped package.
+    """
+    try:
+        with launcher_path.open("rb") as fh:
+            header = fh.read(20)
+    except OSError:
+        return None
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        return None
+    # byte 5 is EI_DATA: 1 = little-endian, 2 = big-endian.
+    endian = "little" if header[5] == 1 else "big"
+    e_machine = int.from_bytes(header[18:20], endian)
+    return _ELF_MACHINE_TO_DEB_ARCH.get(e_machine)
+
+
 def _detect_architecture() -> str:
     dpkg = shutil.which("dpkg")
     if dpkg:
@@ -218,7 +250,23 @@ def build_deb(
             f"Launcher missing at {bundle.launcher_path}. Rebuild the bundle."
         )
 
-    architecture = architecture or _detect_architecture()
+    bundle_arch = detect_bundle_architecture(bundle.launcher_path)
+    if bundle_arch is None:
+        raise RuntimeError(
+            f"Could not determine architecture of {bundle.launcher_path}. "
+            "Expected a Linux ELF binary. If you built the bundle on macOS, "
+            "rebuild inside a Linux container for the target architecture."
+        )
+
+    if architecture is None:
+        architecture = bundle_arch
+    elif architecture != bundle_arch:
+        raise RuntimeError(
+            f"Architecture mismatch: requested --architecture={architecture} "
+            f"but the PyInstaller bundle at {bundle.launcher_path} is {bundle_arch}. "
+            "Rebuild the bundle on a matching host/container or drop the override."
+        )
+
     deb_version = f"{__version__}-{revision}"
 
     tempdir = Path(tempfile.mkdtemp(prefix="aiventbus-deb-"))
