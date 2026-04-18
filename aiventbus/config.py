@@ -73,6 +73,13 @@ class LoggingConfig:
 
 
 @dataclass
+class TelemetryConfig:
+    enabled: bool = True
+    path: str = "/metrics"
+    queue_depth_sample_interval_seconds: float = 5.0
+
+
+@dataclass
 class ProducersConfig:
     clipboard_enabled: bool = True
     clipboard_poll_interval_ms: int = 500
@@ -158,6 +165,7 @@ class AppConfig:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     lanes: LaneConfig = field(default_factory=LaneConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     seed_defaults: bool = True
     # Transient: populated by ``load_config``. Not persisted to YAML.
     sources: ConfigSources = field(default_factory=ConfigSources)
@@ -286,6 +294,7 @@ def load_config(
         tools=ToolsConfig(**raw.get("tools", {})),
         lanes=LaneConfig(**raw.get("lanes", {})),
         classifier=ClassifierConfig(**raw.get("classifier", {})),
+        telemetry=TelemetryConfig(**raw.get("telemetry", {})),
         seed_defaults=raw.get("seed_defaults", True),
     )
     cfg.sources = ConfigSources(

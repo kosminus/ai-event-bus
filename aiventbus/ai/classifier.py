@@ -11,6 +11,7 @@ import logging
 
 from aiventbus.ai.ollama_client import OllamaClient
 from aiventbus.models import Agent, Event
+from aiventbus.telemetry import record_classifier_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,12 @@ class EventClassifier:
                 messages=[{"role": "user", "content": prompt}],
                 options={"num_predict": 150, "temperature": 0.1},
             )
-            return self._parse_response(response, available_agents)
+            result = self._parse_response(response, available_agents)
+            record_classifier_fallback("matched" if result.route_to else "unmatched")
+            return result
         except Exception as e:
             logger.error("Classifier error: %s", e)
+            record_classifier_fallback("error")
             return ClassificationResult(route_to=[], reason=f"Classifier error: {e}")
 
     def _parse_response(self, raw: str, agents: list[Agent]) -> ClassificationResult:

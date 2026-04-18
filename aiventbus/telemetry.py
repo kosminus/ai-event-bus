@@ -9,7 +9,7 @@ from threading import Lock
 
 from fastapi import Request, Response
 try:
-    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+    from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 except ModuleNotFoundError:  # pragma: no cover - exercised indirectly in tests
     CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
@@ -65,6 +65,21 @@ except ModuleNotFoundError:  # pragma: no cover - exercised indirectly in tests
 
     class Histogram(_MetricBase):
         metric_type = "histogram"
+
+    class Gauge(_MetricBase):
+        metric_type = "gauge"
+
+        def _set(self, label_values: tuple[str, ...], amount: float) -> None:
+            with _FALLBACK_LOCK:
+                self.samples[label_values] = amount
+
+        def labels(self, **labels: str) -> "_GaugeChild":
+            values = tuple(str(labels.get(label, "")) for label in self.labelnames)
+            return _GaugeChild(self, values)
+
+    class _GaugeChild(_MetricChild):
+        def set(self, amount: float) -> None:
+            self._metric._set(self._label_values, amount)
 
     def generate_latest() -> bytes:
         body = "\n".join(metric.render() for metric in _FALLBACK_METRICS if metric.samples)
@@ -153,6 +168,41 @@ ACTION_EXECUTION_DURATION_SECONDS = Histogram(
     "aiventbus_action_execution_duration_seconds",
     "Latency of action execution attempts.",
     ["action_type", "result"],
+)
+
+ASSIGNMENT_STATE_TRANSITIONS_TOTAL = Counter(
+    "aiventbus_assignment_state_transitions_total",
+    "Assignment lifecycle transitions beyond creation.",
+    ["agent_id", "state"],  # claimed|completed|failed|expired|retried|cancelled
+)
+ASSIGNMENT_QUEUE_DEPTH = Gauge(
+    "aiventbus_assignment_queue_depth",
+    "Pending assignments awaiting a claim.",
+    ["lane"],  # interactive|critical|ambient
+)
+
+LLM_TOKENS_TOTAL = Counter(
+    "aiventbus_llm_tokens_total",
+    "Tokens reported by Ollama for LLM requests.",
+    ["agent_id", "model", "kind"],  # prompt|eval
+)
+
+PRODUCER_EVENTS_EMITTED_TOTAL = Counter(
+    "aiventbus_producer_events_emitted_total",
+    "Events emitted by producers.",
+    ["producer"],
+)
+
+SYSTEM_EVENTS_TOTAL = Counter(
+    "aiventbus_system_events_total",
+    "Internal system.* events published by the bus.",
+    ["topic"],
+)
+
+CLASSIFIER_FALLBACKS_TOTAL = Counter(
+    "aiventbus_classifier_fallbacks_total",
+    "Classifier fallback invocations for unmatched events.",
+    ["result"],  # matched|unmatched|error
 )
 
 
@@ -248,6 +298,40 @@ def record_agent_run(agent_id: str, model: str, result: str, duration_seconds: f
     }
     AGENT_RUNS_TOTAL.labels(**labels).inc()
     AGENT_RUN_DURATION_SECONDS.labels(**labels).observe(duration_seconds)
+
+
+def record_assignment_state(agent_id: str, state: str) -> None:
+    ASSIGNMENT_STATE_TRANSITIONS_TOTAL.labels(
+        agent_id=_normalize_label(agent_id),
+        state=_normalize_label(state),
+    ).inc()
+
+
+def set_queue_depth(lane: str, depth: int) -> None:
+    ASSIGNMENT_QUEUE_DEPTH.labels(lane=_normalize_label(lane)).set(float(depth))
+
+
+def record_llm_tokens(agent_id: str, model: str, prompt_tokens: int, eval_tokens: int) -> None:
+    labels = {
+        "agent_id": _normalize_label(agent_id),
+        "model": _normalize_label(model),
+    }
+    if prompt_tokens:
+        LLM_TOKENS_TOTAL.labels(kind="prompt", **labels).inc(prompt_tokens)
+    if eval_tokens:
+        LLM_TOKENS_TOTAL.labels(kind="eval", **labels).inc(eval_tokens)
+
+
+def record_producer_emit(producer: str) -> None:
+    PRODUCER_EVENTS_EMITTED_TOTAL.labels(producer=_normalize_label(producer)).inc()
+
+
+def record_system_event(topic: str) -> None:
+    SYSTEM_EVENTS_TOTAL.labels(topic=_normalize_label(topic)).inc()
+
+
+def record_classifier_fallback(result: str) -> None:
+    CLASSIFIER_FALLBACKS_TOTAL.labels(result=_normalize_label(result)).inc()
 
 
 def record_action_execution(agent_id: str, action_type: str, result: str, duration_seconds: float) -> None:

@@ -24,6 +24,8 @@ from aiventbus.telemetry import (
     record_chain_limit,
     record_event_deduped,
     record_event_published,
+    record_producer_emit,
+    record_system_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,6 +198,8 @@ class EventBus:
         # Persist
         await self.event_repo.create(event)
         record_event_published(event.topic, event.source or producer_id)
+        if producer_id:
+            record_producer_emit(producer_id)
         logger.info("Published event %s on topic %s", event.id, event.topic)
 
         # Broadcast to WebSocket
@@ -242,6 +246,7 @@ class EventBus:
             priority="high",
             source="system",
         )
+        record_system_event(topic)
         await self.event_repo.create(event)
         await self.ws_hub.broadcast(
             f"events:{topic}", "event.new",

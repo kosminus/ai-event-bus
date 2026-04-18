@@ -613,6 +613,20 @@ class AssignmentRepository:
         await self.db.conn.commit()
         return ids
 
+    async def count_pending_by_lane(self) -> dict[str, int]:
+        """Return pending/resumable assignment counts grouped by lane."""
+        cursor = await self.db.conn.execute(
+            """SELECT lane, COUNT(*) AS cnt FROM event_assignments
+               WHERE status IN ('pending', 'resumable')
+               GROUP BY lane""",
+        )
+        rows = await cursor.fetchall()
+        out = {"interactive": 0, "critical": 0, "ambient": 0}
+        for r in rows:
+            lane = r["lane"] or "ambient"
+            out[lane] = r["cnt"]
+        return out
+
     async def exists(self, event_id: str, agent_id: str) -> bool:
         cursor = await self.db.conn.execute(
             "SELECT 1 FROM event_assignments WHERE event_id = ? AND agent_id = ?",

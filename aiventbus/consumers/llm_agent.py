@@ -55,8 +55,10 @@ from aiventbus.storage.repositories import (
 from aiventbus.telemetry import (
     record_action_execution,
     record_agent_run,
+    record_assignment_state,
     record_llm_parse_failure,
     record_llm_request,
+    record_llm_tokens,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,7 @@ class LLMAgentConsumer(BaseConsumer):
                     if not assignment:
                         self._semaphore.release()
                         break
+                    record_assignment_state(self.agent.id, "claimed")
                     asyncio.create_task(self._process_with_semaphore(assignment))
             except asyncio.CancelledError:
                 break
@@ -175,6 +178,7 @@ class LLMAgentConsumer(BaseConsumer):
         if not event:
             logger.error("Event %s not found for assignment %s", assignment.event_id, assignment.id)
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.failed, "Event not found")
+            record_assignment_state(self.agent.id, "failed")
             return
 
         await self.assignment_repo.update_status(assignment.id, AssignmentStatus.running)
@@ -292,6 +296,7 @@ class LLMAgentConsumer(BaseConsumer):
                 ))
 
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.completed)
+            record_assignment_state(self.agent.id, "completed")
             await self.bus.update_event_status(event.id, EventStatus.completed)
             await self.ws_hub.broadcast(
                 f"agents:{self.agent.id}", "agent.response",
@@ -307,6 +312,7 @@ class LLMAgentConsumer(BaseConsumer):
         except Exception as e:
             logger.error("Agent %s failed on event %s: %s", self.agent.id, event.id, e)
             await self.assignment_repo.update_status(assignment.id, AssignmentStatus.failed, str(e))
+            record_assignment_state(self.agent.id, "failed")
             await self.bus.update_event_status(event.id, EventStatus.failed)
             await self.bus._emit_system_event("system.agent_failure", {
                 "agent_id": self.agent.id,
@@ -363,11 +369,19 @@ class LLMAgentConsumer(BaseConsumer):
 
     async def _stream_ollama(self, model: str, messages: list[dict], event) -> str:
         chunks: list[str] = []
-        async for chunk in self.ollama.chat(model, messages):
+        stats: dict = {}
+        async for chunk in self.ollama.chat(model, messages, stats_out=stats):
             chunks.append(chunk)
             await self.ws_hub.broadcast(
                 f"agents:{self.agent.id}", "agent.stream",
                 {"agent_id": self.agent.id, "event_id": event.id, "token": chunk},
+            )
+        if stats:
+            record_llm_tokens(
+                self.agent.id,
+                model,
+                stats.get("prompt_eval_count", 0),
+                stats.get("eval_count", 0),
             )
         return "".join(chunks)
 

@@ -77,8 +77,14 @@ class OllamaClient:
         model: str,
         messages: list[dict[str, str]],
         options: dict | None = None,
+        stats_out: dict | None = None,
     ) -> AsyncIterator[str]:
-        """Streaming chat completion. Yields token chunks."""
+        """Streaming chat completion. Yields token chunks.
+
+        If ``stats_out`` is provided, Ollama's final-chunk counters
+        (``prompt_eval_count``, ``eval_count``) are written into it on
+        successful completion.
+        """
         client = await self._get_client()
         payload = {
             "model": model,
@@ -96,6 +102,9 @@ class OllamaClient:
                 try:
                     data = json.loads(line)
                     if data.get("done"):
+                        if stats_out is not None:
+                            stats_out["prompt_eval_count"] = data.get("prompt_eval_count", 0)
+                            stats_out["eval_count"] = data.get("eval_count", 0)
                         break
                     content = data.get("message", {}).get("content", "")
                     if content:
