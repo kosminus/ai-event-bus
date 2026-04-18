@@ -10,8 +10,8 @@ import json
 import logging
 from typing import Any, TYPE_CHECKING
 
-from aiventbus.models import Agent, Event, EventAssignment, KnowledgeEntry
-from aiventbus.storage.repositories import EventRepository, KnowledgeRepository, MemoryRepository
+from aiventbus.models import Agent, Event, EventAssignment, KnowledgeEntry, MemoryRecord
+from aiventbus.storage.repositories import EventRepository, KnowledgeRepository, MemoryRepository, MemoryStore
 
 if TYPE_CHECKING:
     from aiventbus.core.executor import Executor
@@ -28,11 +28,13 @@ class ContextEngine:
 
     def __init__(self, event_repo: EventRepository, memory_repo: MemoryRepository,
                  knowledge_repo: KnowledgeRepository | None = None,
-                 executor: Executor | None = None):
+                 executor: Executor | None = None,
+                 long_term_memory: MemoryStore | None = None):
         self.event_repo = event_repo
         self.memory_repo = memory_repo
         self.knowledge_repo = knowledge_repo
         self.executor = executor
+        self.long_term_memory = long_term_memory
 
     async def build_prompt(
         self,
@@ -74,6 +76,17 @@ class ContextEngine:
                 if used_tokens + knowledge_tokens < token_budget * 0.2:
                     messages.append({"role": "system", "content": knowledge_text})
                     used_tokens += knowledge_tokens
+
+        # 2.75. Recalled experience (distilled long-term memory)
+        if self.long_term_memory:
+            recalled = await self.long_term_memory.search_for_event(event.topic, agent.id, limit=5)
+            if recalled:
+                recalled_text = self._format_recalled_experience(recalled)
+                recalled_tokens = self._estimate_tokens(recalled_text)
+                if used_tokens + recalled_tokens < token_budget * 0.12:
+                    messages.append({"role": "system", "content": recalled_text})
+                    used_tokens += recalled_tokens
+                    await self.long_term_memory.touch([memory.id for memory in recalled])
 
         # 3. Recent memory (conversation history)
         memory = await self.memory_repo.get_recent(agent.id, scope, limit=20)
@@ -314,3 +327,11 @@ class ContextEngine:
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimate."""
         return len(text) // CHARS_PER_TOKEN
+
+    def _format_recalled_experience(self, memories: list[MemoryRecord]) -> str:
+        lines = ["## Recalled Experience"]
+        for memory in memories:
+            date = memory.created_at.date().isoformat()
+            summary = memory.summary or memory.content
+            lines.append(f"- [{memory.kind.value} • scope:{memory.scope} • {date}] {summary}")
+        return "\n".join(lines)

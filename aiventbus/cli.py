@@ -9,6 +9,8 @@ Usage:
     aibus knowledge get <key>
     aibus knowledge set <key> <value>
     aibus knowledge list [--prefix system.]
+    aibus memory list
+    aibus memory add
     aibus trace <trace_id>
 """
 
@@ -340,6 +342,96 @@ def knowledge_list(ctx, prefix: str | None):
     r = client.get("/api/v1/knowledge", params=params)
     for entry in r.json():
         click.echo(f"  {entry['key']:40s} = {entry['value']}")
+
+
+@cli.group()
+def memory():
+    """Manage distilled long-term memory."""
+    pass
+
+
+@memory.command("list")
+@click.option("--scope", default=None, help="Filter by scope")
+@click.option("--kind", default=None, help="Filter by kind")
+@click.option("--tag", default=None, help="Filter by tag")
+@click.option("--query", "q", default=None, help="Full-text search query")
+@click.option("--limit", default=20, help="Max memories to show")
+@click.pass_context
+def memory_list(ctx, scope: str | None, kind: str | None, tag: str | None, q: str | None, limit: int):
+    """List or search distilled memories."""
+    client = _client(ctx.obj["url"])
+    params = {"limit": limit}
+    if scope:
+        params["scope"] = scope
+    if kind:
+        params["kind"] = kind
+    if tag:
+        params["tag"] = tag
+    if q:
+        params["q"] = q
+    r = client.get("/api/v1/memories", params=params)
+    if r.status_code != 200:
+        click.echo(f"Error: {r.text}", err=True)
+        sys.exit(1)
+    for entry in r.json():
+        summary = entry.get("summary") or entry["content"]
+        click.echo(
+            f"{entry['id']}  [{entry['kind']} • {entry['scope']}] "
+            f"importance={entry['importance']:.2f}  {summary}"
+        )
+
+
+@memory.command("add")
+@click.option("--kind", required=True, type=click.Choice(["episodic", "semantic", "procedural"]))
+@click.option("--scope", required=True, help="Memory scope: global, user, or agent:<id>")
+@click.option("--content", required=True, help="Full memory content")
+@click.option("--summary", default=None, help="Short summary for prompt recall")
+@click.option("--importance", default=0.5, type=float, help="Importance from 0.0 to 1.0")
+@click.option("--tag", "tags", multiple=True, help="Repeatable tag")
+@click.option("--source-event-id", default=None, help="Optional source event id")
+@click.pass_context
+def memory_add(
+    ctx,
+    kind: str,
+    scope: str,
+    content: str,
+    summary: str | None,
+    importance: float,
+    tags: tuple[str, ...],
+    source_event_id: str | None,
+):
+    """Create a distilled memory record."""
+    client = _client(ctx.obj["url"])
+    r = client.post(
+        "/api/v1/memories",
+        json={
+            "kind": kind,
+            "scope": scope,
+            "content": content,
+            "summary": summary,
+            "importance": importance,
+            "tags": list(tags),
+            "source_event_id": source_event_id,
+        },
+    )
+    if r.status_code != 200:
+        click.echo(f"Error: {r.text}", err=True)
+        sys.exit(1)
+    entry = r.json()
+    click.echo(f"Stored memory: {entry['id']}")
+
+
+@memory.command("delete")
+@click.argument("memory_id")
+@click.pass_context
+def memory_delete(ctx, memory_id: str):
+    """Delete a distilled memory record."""
+    client = _client(ctx.obj["url"])
+    r = client.delete(f"/api/v1/memories/{memory_id}")
+    if r.status_code != 200:
+        click.echo(f"Error: {r.text}", err=True)
+        sys.exit(1)
+    click.echo(f"Deleted: {memory_id}")
 
 
 @cli.command("shell-hook")

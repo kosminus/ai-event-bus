@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -20,6 +22,10 @@ from aiventbus.models import (
     KnowledgeEntry,
     Lane,
     MemoryEntry,
+    MemoryRecord,
+    MemoryRecordCreate,
+    MemoryRecordUpdate,
+    MemoryKind,
     PendingAction,
     PinnedFact,
     Producer,
@@ -716,6 +722,209 @@ class MemoryRepository:
             (agent_id, scope, content, _now_iso()),
         )
         await self.db.conn.commit()
+
+
+def _memory_id() -> str:
+    return f"mem_{uuid4().hex[:12]}"
+
+
+class MemoryStore:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def add(self, data: MemoryRecordCreate) -> MemoryRecord:
+        record = MemoryRecord(
+            id=_memory_id(),
+            kind=data.kind,
+            scope=data.scope,
+            content=data.content,
+            summary=data.summary,
+            importance=data.importance,
+            tags=data.tags,
+            source_event_id=data.source_event_id,
+            expires_at=data.expires_at,
+        )
+        await self.db.conn.execute(
+            """INSERT INTO memories
+               (id, kind, scope, content, summary, importance, tags, source_event_id,
+                created_at, last_accessed_at, access_count, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record.id,
+                record.kind.value,
+                record.scope,
+                record.content,
+                record.summary,
+                record.importance,
+                json.dumps(record.tags),
+                record.source_event_id,
+                record.created_at.isoformat(),
+                None,
+                record.access_count,
+                record.expires_at.isoformat() if record.expires_at else None,
+            ),
+        )
+        await self.db.conn.commit()
+        return record
+
+    async def get(self, memory_id: str) -> MemoryRecord | None:
+        cursor = await self.db.conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        row = await cursor.fetchone()
+        return self._row_to_memory(row) if row else None
+
+    async def list(
+        self,
+        scope: str | None = None,
+        kind: str | None = None,
+        tag: str | None = None,
+        limit: int = 100,
+        q: str | None = None,
+    ) -> list[MemoryRecord]:
+        if q:
+            rows = await self._search_rows(q=q, scopes=[scope] if scope else None, kind=kind, limit=limit)
+            memories = [self._row_to_memory(r) for r in rows]
+        else:
+            query = "SELECT * FROM memories WHERE 1=1"
+            params: list = []
+            if scope:
+                query += " AND scope = ?"
+                params.append(scope)
+            if kind:
+                query += " AND kind = ?"
+                params.append(kind)
+            query += " AND (expires_at IS NULL OR expires_at > ?)"
+            params.append(_now_iso())
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            cursor = await self.db.conn.execute(query, params)
+            memories = [self._row_to_memory(r) for r in await cursor.fetchall()]
+
+        if tag:
+            memories = [m for m in memories if tag in m.tags]
+        return memories
+
+    async def search(self, query: str, scopes: list[str], kind: str | None = None, limit: int = 5) -> list[MemoryRecord]:
+        rows = await self._search_rows(q=query, scopes=scopes, kind=kind, limit=limit)
+        return [self._row_to_memory(r) for r in rows]
+
+    async def touch(self, memory_ids: list[str]) -> None:
+        if not memory_ids:
+            return
+        placeholders = ",".join("?" for _ in memory_ids)
+        params = [_now_iso(), *memory_ids]
+        await self.db.conn.execute(
+            f"""UPDATE memories
+                SET last_accessed_at = ?, access_count = access_count + 1
+                WHERE id IN ({placeholders})""",
+            params,
+        )
+        await self.db.conn.commit()
+
+    async def update(self, memory_id: str, data: MemoryRecordUpdate) -> MemoryRecord | None:
+        await self.db.conn.execute(
+            "UPDATE memories SET importance = ? WHERE id = ?",
+            (data.importance, memory_id),
+        )
+        await self.db.conn.commit()
+        return await self.get(memory_id)
+
+    async def delete(self, memory_id: str) -> bool:
+        cursor = await self.db.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        await self.db.conn.commit()
+        return cursor.rowcount > 0
+
+    async def search_for_event(self, event_topic: str, agent_id: str, limit: int = 5) -> list[MemoryRecord]:
+        if not event_topic:
+            return []
+        topic_root = event_topic.split(".")[0] if event_topic else ""
+        queries = [event_topic]
+        if topic_root and topic_root != event_topic:
+            queries.append(topic_root)
+        search_query = " OR ".join(self._fts_query(q) for q in queries if q).strip()
+        if not search_query:
+            return []
+        return await self.search(
+            query=search_query,
+            scopes=[f"agent:{agent_id}", "user", "global"],
+            limit=limit,
+        )
+
+    async def _search_rows(
+        self,
+        q: str,
+        scopes: list[str] | None,
+        kind: str | None,
+        limit: int,
+    ) -> list:
+        params: list = [q, _now_iso()]
+        query_limit = max(limit * 5, limit)
+        scope_filter = ""
+        if scopes:
+            placeholders = ",".join("?" for _ in scopes)
+            scope_filter = f" AND m.scope IN ({placeholders})"
+            params.extend(scopes)
+        kind_filter = ""
+        if kind:
+            kind_filter = " AND m.kind = ?"
+            params.append(kind)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT m.*,
+                   bm25(memories_fts) AS fts_rank
+            FROM memories_fts
+            JOIN memories m ON m.rowid = memories_fts.rowid
+            WHERE memories_fts MATCH ?
+              AND (m.expires_at IS NULL OR m.expires_at > ?)
+              {scope_filter}
+              {kind_filter}
+            ORDER BY fts_rank ASC, m.created_at DESC
+            LIMIT ?
+            """,
+            [*params, query_limit],
+        )
+        rows = await cursor.fetchall()
+        primary_scope = scopes[0] if scopes else None
+        scored = sorted(rows, key=lambda row: self._score_row(row, primary_scope), reverse=True)
+        return scored[:limit]
+
+    def _row_to_memory(self, row) -> MemoryRecord:
+        return MemoryRecord(
+            id=row["id"],
+            kind=MemoryKind(row["kind"]),
+            scope=row["scope"],
+            content=row["content"],
+            summary=row["summary"],
+            importance=row["importance"],
+            tags=json.loads(row["tags"] or "[]"),
+            source_event_id=row["source_event_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            last_accessed_at=datetime.fromisoformat(row["last_accessed_at"]) if row["last_accessed_at"] else None,
+            access_count=row["access_count"],
+            expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+        )
+
+    def _score_row(self, row, primary_scope: str | None) -> float:
+        base_rank = row["fts_rank"] if row["fts_rank"] is not None else 0.0
+        relevance = 1.0 / (1.0 + abs(float(base_rank)))
+        importance = max(float(row["importance"]), 0.05)
+        scope = row["scope"]
+        if primary_scope and scope == primary_scope:
+            scope_boost = 1.15
+        elif scope == "user":
+            scope_boost = 1.10
+        else:
+            scope_boost = 1.00
+        created = datetime.fromisoformat(row["created_at"])
+        last_accessed_raw = row["last_accessed_at"]
+        last_accessed = datetime.fromisoformat(last_accessed_raw) if last_accessed_raw else created
+        age_days = max((datetime.now(timezone.utc) - last_accessed).total_seconds() / 86400.0, 0.0)
+        half_life = 30.0 if row["kind"] == "episodic" else 180.0
+        recency = math.exp(-age_days / half_life)
+        return relevance * importance * scope_boost * recency
+
+    def _fts_query(self, raw: str) -> str:
+        terms = [t for t in re.split(r"[^A-Za-z0-9_]+", raw) if t]
+        return " OR ".join(f'"{term}"' for term in terms)
 
 
 # --- Knowledge ---
