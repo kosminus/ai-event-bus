@@ -7,6 +7,7 @@ Agents claim assignments when ready (pull model).
 from __future__ import annotations
 
 import logging
+import time
 from fnmatch import fnmatch
 
 from aiventbus.config import AppConfig
@@ -16,6 +17,11 @@ from aiventbus.storage.repositories import (
     AssignmentRepository,
     EventRepository,
     RoutingRuleRepository,
+)
+from aiventbus.telemetry import (
+    ROUTING_DURATION_SECONDS,
+    record_assignment_created,
+    record_routing_result,
 )
 
 # Lazy import to avoid circular deps
@@ -79,8 +85,14 @@ class AssignmentManager:
 
     async def route_event(self, event: Event) -> list[RoutingMatch]:
         """Match event against routing rules, create assignments, notify agents."""
+        start = time.monotonic()
+        routing_result = "skipped_system"
+
         # Skip system events
         if event.topic.startswith("system."):
+            ROUTING_DURATION_SECONDS.labels(result=routing_result).observe(
+                time.monotonic() - start
+            )
             return []
 
         rules = await self.rule_repo.list(enabled_only=True)
@@ -122,10 +134,13 @@ class AssignmentManager:
                 classifier_matches = await self._classify_event(event, seen_agents)
                 if classifier_matches:
                     matches = classifier_matches
+                    routing_result = "classifier_matched"
 
             if not matches:
                 # Still no match after classifier — emit to system.unmatched
                 logger.info("No routing match for event %s (topic=%s)", event.id, event.topic)
+                routing_result = "unmatched"
+                record_routing_result(routing_result)
                 if self._bus:
                     await self._bus.update_event_status(event.id, EventStatus.routed)
                     await self._bus._emit_system_event("system.unmatched", {
@@ -135,7 +150,14 @@ class AssignmentManager:
                     })
                 else:
                     await self.event_repo.update_status(event.id, EventStatus.routed)
+                ROUTING_DURATION_SECONDS.labels(result=routing_result).observe(
+                    time.monotonic() - start
+                )
                 return []
+
+        if routing_result != "classifier_matched":
+            routing_result = "matched"
+        record_routing_result(routing_result)
 
         # Resolve priority lane for this event
         lane = self._resolve_lane(event)
@@ -157,6 +179,7 @@ class AssignmentManager:
                 "Created assignment %s: event %s -> agent %s",
                 assignment.id, event.id, match.agent_id,
             )
+            record_assignment_created(match.agent_id, lane.value)
 
             # Notify agent that work is available
             notifier = self._notify_agent.get(match.agent_id)
@@ -170,6 +193,9 @@ class AssignmentManager:
             await self._bus.update_event_status(event.id, EventStatus.assigned)
         else:
             await self.event_repo.update_status(event.id, EventStatus.assigned)
+        ROUTING_DURATION_SECONDS.labels(result=routing_result).observe(
+            time.monotonic() - start
+        )
         return matches
 
     def _rule_matches(self, rule, event: Event) -> bool:

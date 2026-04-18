@@ -9,6 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -39,6 +40,7 @@ from aiventbus.storage.repositories import (
 )
 from aiventbus.storage.seed_defaults import seed_defaults
 from aiventbus.storage.seeder import seed_system_facts
+from aiventbus.telemetry import http_metrics_middleware, metrics_response
 
 logger = logging.getLogger("aiventbus")
 
@@ -348,6 +350,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.middleware("http")(http_metrics_middleware)
 
     # CORS
     app.add_middleware(
@@ -372,6 +375,13 @@ def create_app() -> FastAPI:
     app.include_router(producers.router)
     app.include_router(webhook.router)
     app.include_router(cron.router)
+    app.add_api_route(
+        "/metrics",
+        lambda: metrics_response(),
+        methods=["GET"],
+        include_in_schema=False,
+        response_class=Response,
+    )
 
     # Static files (Web UI)
     static_dir = Path(__file__).parent / "static"
