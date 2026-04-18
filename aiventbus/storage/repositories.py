@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -781,7 +782,13 @@ class MemoryStore:
         q: str | None = None,
     ) -> list[MemoryRecord]:
         if q:
-            rows = await self._search_rows(q=q, scopes=[scope] if scope else None, kind=kind, limit=limit)
+            rows = await self._search_rows(
+                q=q,
+                scopes=[scope] if scope else None,
+                kind=kind,
+                limit=limit,
+                candidate_multiplier=20 if tag else 5,
+            )
             memories = [self._row_to_memory(r) for r in rows]
         else:
             query = "SELECT * FROM memories WHERE 1=1"
@@ -840,7 +847,7 @@ class MemoryStore:
         queries = [event_topic]
         if topic_root and topic_root != event_topic:
             queries.append(topic_root)
-        search_query = " OR ".join(self._fts_query(q) for q in queries if q).strip()
+        search_query = " OR ".join(filter(None, (self._fts_query(q) for q in queries if q)))
         if not search_query:
             return []
         return await self.search(
@@ -855,9 +862,14 @@ class MemoryStore:
         scopes: list[str] | None,
         kind: str | None,
         limit: int,
+        candidate_multiplier: int = 5,
     ) -> list:
-        params: list = [q, _now_iso()]
-        query_limit = max(limit * 5, limit)
+        sanitized_q = self._fts_query(q)
+        if not sanitized_q:
+            return await self._like_rows(q=q, scopes=scopes, kind=kind, limit=limit)
+
+        params: list = [sanitized_q, _now_iso()]
+        query_limit = max(limit * candidate_multiplier, limit)
         scope_filter = ""
         if scopes:
             placeholders = ",".join("?" for _ in scopes)
@@ -867,22 +879,25 @@ class MemoryStore:
         if kind:
             kind_filter = " AND m.kind = ?"
             params.append(kind)
-        cursor = await self.db.conn.execute(
-            f"""
-            SELECT m.*,
-                   bm25(memories_fts) AS fts_rank
-            FROM memories_fts
-            JOIN memories m ON m.rowid = memories_fts.rowid
-            WHERE memories_fts MATCH ?
-              AND (m.expires_at IS NULL OR m.expires_at > ?)
-              {scope_filter}
-              {kind_filter}
-            ORDER BY fts_rank ASC, m.created_at DESC
-            LIMIT ?
-            """,
-            [*params, query_limit],
-        )
-        rows = await cursor.fetchall()
+        try:
+            cursor = await self.db.conn.execute(
+                f"""
+                SELECT m.*,
+                       bm25(memories_fts) AS fts_rank
+                FROM memories_fts
+                JOIN memories m ON m.rowid = memories_fts.rowid
+                WHERE memories_fts MATCH ?
+                  AND (m.expires_at IS NULL OR m.expires_at > ?)
+                  {scope_filter}
+                  {kind_filter}
+                ORDER BY fts_rank ASC, m.created_at DESC
+                LIMIT ?
+                """,
+                [*params, query_limit],
+            )
+            rows = await cursor.fetchall()
+        except sqlite3.OperationalError:
+            return await self._like_rows(q=q, scopes=scopes, kind=kind, limit=limit)
         primary_scope = scopes[0] if scopes else None
         scored = sorted(rows, key=lambda row: self._score_row(row, primary_scope), reverse=True)
         return scored[:limit]
@@ -915,16 +930,61 @@ class MemoryStore:
         else:
             scope_boost = 1.00
         created = datetime.fromisoformat(row["created_at"])
-        last_accessed_raw = row["last_accessed_at"]
-        last_accessed = datetime.fromisoformat(last_accessed_raw) if last_accessed_raw else created
-        age_days = max((datetime.now(timezone.utc) - last_accessed).total_seconds() / 86400.0, 0.0)
+        age_days = max((datetime.now(timezone.utc) - created).total_seconds() / 86400.0, 0.0)
         half_life = 30.0 if row["kind"] == "episodic" else 180.0
         recency = math.exp(-age_days / half_life)
-        return relevance * importance * scope_boost * recency
+        access_count = max(int(row["access_count"]), 0)
+        access_boost = min(1.0 + (access_count * 0.03), 1.30)
+        return relevance * importance * scope_boost * recency * access_boost
 
     def _fts_query(self, raw: str) -> str:
-        terms = [t for t in re.split(r"[^A-Za-z0-9_]+", raw) if t]
+        seen: set[str] = set()
+        terms: list[str] = []
+        for term in re.split(r"[^A-Za-z0-9_]+", raw):
+            if not term:
+                continue
+            lowered = term.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            terms.append(term)
         return " OR ".join(f'"{term}"' for term in terms)
+
+    async def _like_rows(
+        self,
+        q: str,
+        scopes: list[str] | None,
+        kind: str | None,
+        limit: int,
+    ) -> list:
+        like_term = f"%{q.strip()}%"
+        if like_term == "%%":
+            return []
+        params: list = [like_term, like_term, _now_iso()]
+        scope_filter = ""
+        if scopes:
+            placeholders = ",".join("?" for _ in scopes)
+            scope_filter = f" AND scope IN ({placeholders})"
+            params.extend(scopes)
+        kind_filter = ""
+        if kind:
+            kind_filter = " AND kind = ?"
+            params.append(kind)
+        cursor = await self.db.conn.execute(
+            f"""
+            SELECT *,
+                   0.0 AS fts_rank
+            FROM memories
+            WHERE (content LIKE ? OR coalesce(summary, '') LIKE ?)
+              AND (expires_at IS NULL OR expires_at > ?)
+              {scope_filter}
+              {kind_filter}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            [*params, limit],
+        )
+        return await cursor.fetchall()
 
 
 # --- Knowledge ---

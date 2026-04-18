@@ -164,32 +164,6 @@ CREATE TABLE IF NOT EXISTS knowledge (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- Distilled long-term memory
-CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    content TEXT NOT NULL,
-    summary TEXT,
-    importance REAL NOT NULL DEFAULT 0.5,
-    tags TEXT NOT NULL DEFAULT '[]',
-    source_event_id TEXT REFERENCES events(id),
-    created_at TEXT DEFAULT (datetime('now')),
-    last_accessed_at TEXT,
-    access_count INTEGER NOT NULL DEFAULT 0,
-    expires_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
-CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
-CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
-CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    content,
-    summary,
-    content='memories',
-    content_rowid='rowid'
-);
-
 -- Pending actions (confirmation queue)
 CREATE TABLE IF NOT EXISTS pending_actions (
     id TEXT PRIMARY KEY,
@@ -297,7 +271,12 @@ class Database:
             END;
             """
         )
-        await self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+        cursor = await self._conn.execute("SELECT count(*) AS n FROM memories")
+        memories_count = (await cursor.fetchone())["n"]
+        cursor = await self._conn.execute("SELECT count(*) AS n FROM memories_fts")
+        fts_count = (await cursor.fetchone())["n"]
+        if memories_count > 0 and fts_count == 0:
+            await self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
         await self._conn.commit()
 
         # Add tool-use loop state columns to event_assignments if missing

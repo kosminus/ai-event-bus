@@ -321,7 +321,7 @@ class MemoryRecord(BaseModel):
     scope: str
     content: str
     summary: str | None = None
-    importance: float = 0.5
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
     tags: list[str] = Field(default_factory=list)
     source_event_id: str | None = None
     created_at: datetime = Field(default_factory=_now)
