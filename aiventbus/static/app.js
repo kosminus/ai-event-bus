@@ -18,6 +18,12 @@ const state = {
     producers: [],
     pendingActions: [],
     actionHistory: [],
+    memories: [],
+    memoryFilters: {
+        q: '',
+        scope: '',
+        kind: '',
+    },
     agentStreams: {},  // agent_id -> current streaming text
 };
 
@@ -186,6 +192,7 @@ function renderMain() {
         case 'events': renderEventsView(main); break;
         case 'agents': renderAgentsView(main); break;
         case 'approvals': renderApprovalsView(main); break;
+        case 'memories': renderMemoriesView(main); break;
         case 'producers': renderProducersView(main); break;
         case 'config': renderConfigView(main); break;
         case 'event-detail': renderEventDetail(main); break;
@@ -332,6 +339,75 @@ function renderAgentsView(el) {
         <div class="agents-grid" id="agents-grid"></div>
     `;
     renderAgents();
+}
+
+function renderMemoriesView(el) {
+    const { q, scope, kind } = state.memoryFilters;
+    el.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:12px;flex-wrap:wrap">
+            <h2 style="font-size:16px">Memories</h2>
+            <div style="font-size:12px;color:var(--text-muted)">
+                Recalled experience is searchable and user-reviewable here.
+            </div>
+        </div>
+        <div class="card">
+            <div class="memory-toolbar">
+                <input id="memory-search" placeholder="Search recalled experience..." value="${escapeHtml(q)}" />
+                <select id="memory-scope">
+                    <option value="">All scopes</option>
+                    <option value="user" ${scope === 'user' ? 'selected' : ''}>user</option>
+                    <option value="global" ${scope === 'global' ? 'selected' : ''}>global</option>
+                    ${state.agents.map(a => `<option value="agent:${escapeAttr(a.id)}" ${scope === `agent:${a.id}` ? 'selected' : ''}>agent:${escapeHtml(a.id)}</option>`).join('')}
+                </select>
+                <select id="memory-kind">
+                    <option value="">All kinds</option>
+                    <option value="episodic" ${kind === 'episodic' ? 'selected' : ''}>episodic</option>
+                    <option value="semantic" ${kind === 'semantic' ? 'selected' : ''}>semantic</option>
+                    <option value="procedural" ${kind === 'procedural' ? 'selected' : ''}>procedural</option>
+                </select>
+                <button class="btn btn-primary" onclick="applyMemoryFilters()">Search</button>
+                <button class="btn" onclick="resetMemoryFilters()">Reset</button>
+            </div>
+        </div>
+        <div id="memories-list">
+            ${renderMemoriesList()}
+        </div>
+    `;
+}
+
+function renderMemoriesList() {
+    if (state.memories.length === 0) {
+        return '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted)">No memories matched this query.</div>';
+    }
+    return state.memories.map(memory => {
+        const when = memory.created_at ? new Date(memory.created_at).toLocaleString() : '';
+        const tags = (memory.tags || []).map(tag => `<span class="capability-tag">${escapeHtml(tag)}</span>`).join('');
+        const summary = memory.summary || memory.content;
+        return `
+        <div class="memory-card">
+            <div class="memory-card-header">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span class="memory-kind">${escapeHtml(memory.kind)}</span>
+                    <span class="memory-scope">scope:${escapeHtml(memory.scope)}</span>
+                    <span style="font-size:11px;color:var(--text-muted)">${when}</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <span style="font-size:11px;color:var(--text-muted)">importance ${Number(memory.importance || 0).toFixed(2)}</span>
+                    <button class="btn btn-sm btn-danger" onclick="deleteMemory('${escapeAttr(memory.id)}')">Delete</button>
+                </div>
+            </div>
+            <div class="memory-summary">${escapeHtml(summary)}</div>
+            ${memory.summary && memory.content !== memory.summary
+                ? `<div class="memory-body">${escapeHtml(memory.content)}</div>`
+                : ''}
+            <div class="memory-meta">
+                <span>id: <span style="color:var(--accent-blue)">${escapeHtml(memory.id)}</span></span>
+                ${memory.source_event_id ? `<span>event: <span style="color:var(--accent-purple)">${escapeHtml(memory.source_event_id)}</span></span>` : ''}
+                <span>accesses: ${memory.access_count ?? 0}</span>
+                ${tags}
+            </div>
+        </div>`;
+    }).join('');
 }
 
 function renderConfigView(el) {
@@ -893,6 +969,23 @@ async function refreshApprovals() {
     }
 }
 
+async function refreshMemories() {
+    try {
+        const params = new URLSearchParams({ limit: '100' });
+        if (state.memoryFilters.q) params.set('q', state.memoryFilters.q);
+        if (state.memoryFilters.scope) params.set('scope', state.memoryFilters.scope);
+        if (state.memoryFilters.kind) params.set('kind', state.memoryFilters.kind);
+        state.memories = await api(`/memories?${params.toString()}`);
+        if (state.currentView === 'memories') {
+            const list = document.getElementById('memories-list');
+            if (list) list.innerHTML = renderMemoriesList();
+        }
+        render();
+    } catch (e) {
+        console.debug('Memories refresh failed:', e);
+    }
+}
+
 // --- Producers ---
 function renderProducersView(el) {
     el.innerHTML = `
@@ -966,6 +1059,7 @@ function navigate(view) {
     document.querySelectorAll('.nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.view === view);
     });
+    if (view === 'memories') refreshMemories();
     renderMain();
 }
 
@@ -1020,10 +1114,41 @@ function escapeAttr(text) {
     return String(text ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+function applyMemoryFilters() {
+    state.memoryFilters.q = document.getElementById('memory-search')?.value.trim() || '';
+    state.memoryFilters.scope = document.getElementById('memory-scope')?.value || '';
+    state.memoryFilters.kind = document.getElementById('memory-kind')?.value || '';
+    refreshMemories();
+}
+
+function resetMemoryFilters() {
+    state.memoryFilters = { q: '', scope: '', kind: '' };
+    refreshMemories();
+    if (state.currentView === 'memories') renderMain();
+}
+
+async function deleteMemory(memoryId) {
+    if (!confirm(`Delete memory ${memoryId}? This cannot be undone.`)) return;
+    try {
+        await api(`/memories/${memoryId}`, { method: 'DELETE' });
+        state.memories = state.memories.filter(m => m.id !== memoryId);
+        if (state.currentView === 'memories') {
+            const list = document.getElementById('memories-list');
+            if (list) list.innerHTML = renderMemoriesList();
+        }
+        render();
+        showToast('Memory deleted', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     refreshData();
+    refreshMemories();
     // Auto-refresh every 10s
     setInterval(refreshData, 10000);
+    setInterval(refreshMemories, 15000);
 });

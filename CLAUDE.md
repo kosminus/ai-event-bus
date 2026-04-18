@@ -33,6 +33,8 @@ aibus query "question"       # ask a question
 aibus events --limit 20      # list events
 aibus approve <action_id>    # approve pending action
 aibus knowledge list         # list knowledge store
+aibus memory list            # list/search long-term memory
+aibus memory add ...         # add long-term memory
 aibus shell-hook             # print shell preexec hook script
 aibus shell-hook --install   # auto-append to ~/.bashrc or ~/.zshrc
 
@@ -70,7 +72,7 @@ aiventbus/
 │   ├── tools.py             # ToolBackend base class + ToolRegistry for pluggable tools
 │   └── compression.py       # Backpressure (not yet implemented)
 ├── ai/
-│   ├── context_engine.py    # Builds token-bounded prompts with memory + refs + knowledge
+│   ├── context_engine.py    # Builds token-bounded prompts with recalled experience + transcript memory + refs + knowledge
 │   ├── output_parser.py     # Parses structured JSON from LLM responses
 │   ├── ollama_client.py     # Async streaming Ollama HTTP client
 │   ├── classifier.py        # LLM-based routing fallback for unmatched events
@@ -101,7 +103,7 @@ aiventbus/
 │           ├── dbus.py      # notifications + session lock via dbus_fast
 │           └── mac_helper.py# NDJSON stream from aiventbus-mac-helper
 ├── storage/
-│   ├── db.py                # SQLite schema (10 tables), connection, migrations
+│   ├── db.py                # SQLite schema (11 tables + FTS), connection, migrations
 │   ├── repositories.py      # CRUD for all entities
 │   ├── seeder.py            # System facts auto-seeder (hostname, GPU, memory, etc.)
 │   └── seed_defaults.py     # Default agents + routing rules seeder
@@ -114,6 +116,7 @@ aiventbus/
 │   ├── cron.py              # Cron job management API (CRUD scheduled jobs)
 │   ├── actions.py           # Confirmation queue (pending/approve/deny)
 │   ├── knowledge.py         # Knowledge store CRUD
+│   ├── memories.py          # Distilled long-term memory CRUD + search
 │   ├── ws.py                # WebSocket hub (multiplexed channels)
 │   └── system.py            # Health, topics, status
 ├── static/
@@ -149,6 +152,7 @@ bin/
 - **Dynamic agent prompts**: available action types generated from executor + tool registry, not hardcoded
 - **Chain reactions**: agent `emit_event` actions publish back to the bus with `parent_event` lineage and inherited `trace_id`
 - **Knowledge store**: durable key-value facts in SQLite, auto-seeded with system info, injected into prompts
+- **Distilled long-term memory**: searchable recalled experience with scope (`agent:<id>`, `user`, `global`) separate from transcript memory and canonical knowledge
 - **Classifier fallback**: unmatched events optionally routed by a lightweight LLM classifier
 - **System topics**: `system.unmatched`, `system.parse_failure`, `system.agent_failure`, `system.chain_limit`, `system.action_denied`, `system.unknown_action`
 
@@ -169,6 +173,11 @@ Key endpoints:
 - `POST /api/v1/actions/:id/deny` — deny action
 - `GET /api/v1/knowledge` — list knowledge (prefix filter)
 - `PUT /api/v1/knowledge/:key` — set knowledge entry
+- `GET /api/v1/memories` — list/search distilled long-term memories
+- `POST /api/v1/memories` — create long-term memory
+- `GET /api/v1/memories/:id` — get long-term memory
+- `PATCH /api/v1/memories/:id` — update long-term memory importance
+- `DELETE /api/v1/memories/:id` — delete long-term memory
 - `GET /api/v1/producers` — list all producers with running status
 - `POST /api/v1/producers/:name/enable` — start a producer
 - `POST /api/v1/producers/:name/disable` — stop a producer
@@ -267,17 +276,18 @@ Disable seeding with `seed_defaults: false` in `config.yaml`. The seeder only ru
 - Executor (shell_exec, file_read, file_write, file_delete, notify, open_app, http_request, tool_call)
 - Pluggable tool backend system (ToolBackend + ToolRegistry) for external tools
 - Confirmation queue with approve/deny API and web UI (Approvals tab with history)
-- Context engine (memory, pinned facts, knowledge store, ref resolution)
+- Context engine (recalled experience, transcript memory, pinned facts, knowledge store, ref resolution)
 - Knowledge store with system facts auto-seeder
+- Distilled long-term memory layer with FTS-backed search, scoped recall, API, CLI, and dashboard tab
 - Output parser (structured JSON extraction)
-- Full web dashboard with real-time WebSocket (events, agents, approvals, producers, config)
+- Full web dashboard with real-time WebSocket (events, agents, approvals, memories, producers, config)
 - Desktop widget (Tauri — chat, activity feed, approvals, tray icon, Ctrl+Space)
-- CLI (`aibus` — query, status, events, approve, deny, knowledge, trace, shell-hook)
+- CLI (`aibus` — query, status, events, approve, deny, knowledge, memory, trace, shell-hook)
 - Producers: clipboard monitor, file watcher, DBus listener, terminal monitor, journald, webhook, cron
 - Shell preexec hook for real-time terminal command capture (bash + zsh)
 - Producers API and web UI tab (list, enable/disable at runtime)
 - Default agents and routing rules seeder (8 agents, 9 routes on first run)
-- SQLite persistence (10 tables) with migrations
+- SQLite persistence (11 tables + FTS virtual table) with migrations
 - Lifecycle manager (expiry, retry)
 - Prometheus telemetry at `GET /metrics` — event/routing/assignment/LLM/executor counters + histograms, queue-depth gauge by lane, LLM token counts, producer emits, `system.*` event counts, classifier fallbacks, HTTP request metrics
 

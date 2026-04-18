@@ -34,6 +34,7 @@ from aiventbus.storage.repositories import (
     EventRepository,
     KnowledgeRepository,
     MemoryRepository,
+    MemoryStore,
     PendingActionRepository,
     ProducerRepository,
     ResponseRepository,
@@ -184,6 +185,7 @@ async def lifespan(app: FastAPI):
     memory_repo = MemoryRepository(_db)
     response_repo = ResponseRepository(_db)
     producer_repo = ProducerRepository(_db)
+    long_term_memory = MemoryStore(_db)
 
     # Initialize WebSocket hub
     ws_hub = WebSocketHub()
@@ -255,7 +257,13 @@ async def lifespan(app: FastAPI):
             logger.warning("Playwright not installed — pip install playwright && playwright install chromium")
 
     # Initialize AI modules (executor passed for dynamic prompt generation)
-    context_engine = ContextEngine(event_repo, memory_repo, knowledge_repo=knowledge_repo, executor=executor)
+    context_engine = ContextEngine(
+        event_repo,
+        memory_repo,
+        knowledge_repo=knowledge_repo,
+        executor=executor,
+        long_term_memory=long_term_memory,
+    )
     output_parser = OutputParser()
 
     # Initialize assignment manager (routing)
@@ -317,7 +325,7 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize API modules
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, producers, webhook, cron
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, memories, producers, webhook, cron
 
     events.init(_bus, event_repo, assignment_repo, response_repo)
     agents.init(agent_repo, memory_repo)
@@ -327,6 +335,7 @@ async def lifespan(app: FastAPI):
     actions.init(action_repo, executor, _bus, ws_hub, assignment_repo=assignment_repo, agent_manager=_agent_manager)
     assignments.init(assignment_repo, action_repo, ws_hub)
     knowledge.init(knowledge_repo)
+    memories.init(long_term_memory)
 
     # Initialize and start producers
     _producer_manager = ProducerManager(bus=_bus, config=_config)
@@ -385,7 +394,7 @@ def create_app() -> FastAPI:
     )
 
     # API routes
-    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, producers, webhook, cron
+    from aiventbus.api import events, agents, routing_rules, ws, system, actions, assignments, knowledge, memories, producers, webhook, cron
 
     app.include_router(events.router)
     app.include_router(agents.router)
@@ -395,6 +404,7 @@ def create_app() -> FastAPI:
     app.include_router(actions.router)
     app.include_router(assignments.router)
     app.include_router(knowledge.router)
+    app.include_router(memories.router)
     app.include_router(producers.router)
     app.include_router(webhook.router)
     app.include_router(cron.router)

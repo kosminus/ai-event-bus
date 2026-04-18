@@ -29,6 +29,7 @@ Existing AI agent frameworks (LangChain, CrewAI) are request/response. This is e
 - **Chain reactions** — agent output becomes a new event that triggers other agents
 - **Priority lanes** — user queries never wait behind background clipboard events
 - **Knowledge store** — durable key-value facts shared across all agents
+- **Distilled long-term memory** — searchable recalled experience separate from transcript history and canonical knowledge
 - **Full traceability** — trace_id on every causal chain from trigger to action
 - **All local** — runs on your machine via Ollama, free and private
 
@@ -67,7 +68,7 @@ aibus install --build-helper  # macOS only: also build + install the Swift sidec
 
 Both forms generate the service unit from the live `sys.executable` + resolved config/DB/log paths, so a daemon launched by systemd or launchd uses the same state as a CLI run from the repo. `aibus uninstall` removes it; `aibus uninstall --purge` also deletes the data/config/log dirs.
 
-Open [http://localhost:8420](http://localhost:8420) for the dashboard. API docs at [http://localhost:8420/docs](http://localhost:8420/docs).
+Open [http://localhost:8420](http://localhost:8420) for the dashboard. The web UI now includes a **Memories** tab for searching and deleting distilled long-term memory. API docs at [http://localhost:8420/docs](http://localhost:8420/docs).
 
 ## CLI
 
@@ -89,6 +90,11 @@ aibus deny <action_id>
 aibus knowledge list --prefix system.
 aibus knowledge set user.pref.editor vscode
 aibus knowledge get system.gpu
+
+# Long-term memory
+aibus memory list --scope user
+aibus memory add --kind semantic --scope global --content "This machine runs Ollama locally"
+aibus memory delete <memory_id>
 ```
 
 ## Desktop Widget
@@ -251,7 +257,7 @@ Agent prompts are generated dynamically — they list only the action types actu
       └────────┬────────────┘
                ▼
       ┌────────────────────┐
-      │  CONTEXT ENGINE     │  Memory + pinned facts + knowledge store
+      │  CONTEXT ENGINE     │  Recalled experience + transcript memory + pinned facts + knowledge store
       │                      │  Token-bounded prompt assembly
       └────────┬────────────┘
                ▼
@@ -445,7 +451,12 @@ layer (firewall / reverse proxy) if you don't want it exposed.
 | `GET` | `/api/v1/agents` | List agents |
 | `POST` | `/api/v1/agents/:id/enable` | Enable agent |
 | `POST` | `/api/v1/agents/:id/disable` | Disable agent |
-| `GET` | `/api/v1/agents/:id/memory` | Agent memory |
+| `GET` | `/api/v1/agents/:id/memory` | Agent transcript memory + pinned facts |
+| `GET` | `/api/v1/memories` | List/search distilled long-term memories |
+| `POST` | `/api/v1/memories` | Create long-term memory |
+| `GET` | `/api/v1/memories/:id` | Get long-term memory |
+| `PATCH` | `/api/v1/memories/:id` | Update long-term memory importance |
+| `DELETE` | `/api/v1/memories/:id` | Delete long-term memory |
 | `POST` | `/api/v1/routing-rules` | Create routing rule |
 | `GET` | `/api/v1/routing-rules` | List rules |
 | `GET` | `/api/v1/actions/pending` | List pending actions |

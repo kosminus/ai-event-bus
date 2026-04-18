@@ -221,6 +221,64 @@ class Database:
             await self._conn.commit()
             logger.info("Migration: added 'trace_id' column to events")
 
+        # Create long-term memory table + FTS index if missing
+        await self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                content TEXT NOT NULL,
+                summary TEXT,
+                importance REAL NOT NULL DEFAULT 0.5,
+                tags TEXT NOT NULL DEFAULT '[]',
+                source_event_id TEXT REFERENCES events(id),
+                created_at TEXT DEFAULT (datetime('now')),
+                last_accessed_at TEXT,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
+            CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+            CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                content,
+                summary,
+                content='memories',
+                content_rowid='rowid'
+            );
+            """
+        )
+        await self._conn.commit()
+
+        # Keep FTS in sync and backfill existing rows.
+        await self._conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content, summary)
+                VALUES (new.rowid, new.content, coalesce(new.summary, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, summary)
+                VALUES ('delete', old.rowid, old.content, coalesce(old.summary, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, summary)
+                VALUES ('delete', old.rowid, old.content, coalesce(old.summary, ''));
+                INSERT INTO memories_fts(rowid, content, summary)
+                VALUES (new.rowid, new.content, coalesce(new.summary, ''));
+            END;
+            """
+        )
+        cursor = await self._conn.execute("SELECT count(*) AS n FROM memories")
+        memories_count = (await cursor.fetchone())["n"]
+        cursor = await self._conn.execute("SELECT count(*) AS n FROM memories_fts")
+        fts_count = (await cursor.fetchone())["n"]
+        if memories_count > 0 and fts_count == 0:
+            await self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+        await self._conn.commit()
+
         # Add tool-use loop state columns to event_assignments if missing
         cursor = await self._conn.execute("PRAGMA table_info(event_assignments)")
         asgn_cols = {row[1] for row in await cursor.fetchall()}

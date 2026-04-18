@@ -308,6 +308,45 @@ class PinnedFact(BaseModel):
     created_at: datetime = Field(default_factory=_now)
 
 
+class MemoryKind(str, Enum):
+    episodic = "episodic"
+    semantic = "semantic"
+    procedural = "procedural"
+
+
+class MemoryRecord(BaseModel):
+    """A distilled long-term memory record."""
+    id: str
+    kind: MemoryKind
+    scope: str
+    content: str
+    summary: str | None = None
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    tags: list[str] = Field(default_factory=list)
+    source_event_id: str | None = None
+    created_at: datetime = Field(default_factory=_now)
+    last_accessed_at: datetime | None = None
+    access_count: int = 0
+    expires_at: datetime | None = None
+
+
+class MemoryRecordCreate(BaseModel):
+    """Input model for creating a distilled long-term memory record."""
+    kind: MemoryKind
+    scope: str
+    content: str
+    summary: str | None = None
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    tags: list[str] = Field(default_factory=list)
+    source_event_id: str | None = None
+    expires_at: datetime | None = None
+
+
+class MemoryRecordUpdate(BaseModel):
+    """Patch model for updating an existing memory record."""
+    importance: float = Field(ge=0.0, le=1.0)
+
+
 # --- Knowledge Models ---
 
 class KnowledgeEntry(BaseModel):
