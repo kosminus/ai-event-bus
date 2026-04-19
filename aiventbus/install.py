@@ -38,6 +38,33 @@ SYSTEMD_UNIT_NAME = "aiventbus.service"
 LAUNCHD_LABEL = "com.aiventbus.daemon"
 HELPER_BINARY_NAME = "aiventbus-mac-helper"
 
+# When the daemon is installed from a PyInstaller-built .deb, sys.executable is
+# the launcher binary itself and cannot run ``-m aiventbus``. Instead the
+# service must exec the installed ``aiventbus`` symlink directly.
+_FROZEN_LAUNCHER_PATH = Path("/opt/aiventbus/aiventbus-launcher")
+
+
+def _is_frozen_bundle() -> bool:
+    return bool(getattr(sys, "frozen", False)) or hasattr(sys, "_MEIPASS")
+
+
+def _daemon_exec_argv() -> list[str]:
+    """Return the argv the service manager should use to launch the daemon.
+
+    Frozen PyInstaller installs: exec the ``aiventbus`` symlink directly
+    (``/usr/bin/aiventbus`` from the .deb, or whatever is on PATH). Otherwise
+    fall back to the live interpreter + ``python -m aiventbus``.
+    """
+    if _is_frozen_bundle():
+        on_path = shutil.which("aiventbus")
+        if on_path:
+            return [on_path]
+        if _FROZEN_LAUNCHER_PATH.exists():
+            return [str(_FROZEN_LAUNCHER_PATH)]
+        # Last resort: argv[0] resolved to the frozen launcher.
+        return [str(Path(sys.executable).resolve())]
+    return [sys.executable, "-m", "aiventbus"]
+
 
 def _systemd_unit_dir() -> Path:
     """User-scope systemd unit directory."""
@@ -155,20 +182,21 @@ def build_mac_helper(*, dev: bool = False) -> Path:
 
 def _render_systemd_unit(
     *,
-    python_exe: str,
+    exec_argv: list[str],
     config_path: Path,
     db_path: Path,
 ) -> str:
     # Written without leading whitespace so systemd reads every directive
     # at the start of its line (textwrap.dedent fights with the
     # independently-built env lines).
+    exec_start = " ".join(exec_argv)
     return (
         "[Unit]\n"
         "Description=aiventbus daemon\n"
         "After=network.target\n"
         "\n"
         "[Service]\n"
-        f"ExecStart={python_exe} -m aiventbus\n"
+        f"ExecStart={exec_start}\n"
         f"Environment=AIVENTBUS_CONFIG={config_path}\n"
         f"Environment=AIVENTBUS_DB={db_path}\n"
         "Restart=on-failure\n"
@@ -192,7 +220,7 @@ def _install_linux(*, dev: bool) -> None:
     unit_path = unit_dir / SYSTEMD_UNIT_NAME
 
     body = _render_systemd_unit(
-        python_exe=sys.executable,
+        exec_argv=_daemon_exec_argv(),
         config_path=config_path,
         db_path=db_path,
     )
@@ -234,7 +262,7 @@ def _uninstall_linux(*, purge: bool) -> None:
 
 def _render_launchd_plist(
     *,
-    python_exe: str,
+    exec_argv: list[str],
     config_path: Path,
     db_path: Path,
     helper_path: Path | None,
@@ -250,7 +278,7 @@ def _render_launchd_plist(
 
     plist = {
         "Label": LAUNCHD_LABEL,
-        "ProgramArguments": [python_exe, "-m", "aiventbus"],
+        "ProgramArguments": list(exec_argv),
         "EnvironmentVariables": env_vars,
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -290,7 +318,7 @@ def _install_macos(*, dev: bool, build_helper: bool) -> None:
     stderr_log = log_dir / "stderr.log"
 
     body = _render_launchd_plist(
-        python_exe=sys.executable,
+        exec_argv=_daemon_exec_argv(),
         config_path=config_path,
         db_path=db_path,
         helper_path=helper_path,
